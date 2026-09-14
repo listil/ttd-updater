@@ -36,6 +36,12 @@ func init() {
 type App struct {
 	ctx   context.Context
 	prefs Prefs
+
+	// ttd_updater 자기 자신의 GitHub Releases 최신 버전 확인 결과. run() 시작 부분에서 한 번
+	// 채워지고, downloadURL이 비어있지 않으면 새 버전이 있다는 뜻이다.
+	selfUpdateVersion     string
+	selfUpdateDownloadURL string
+	selfUpdateSize        int64
 }
 
 func NewApp() *App {
@@ -44,6 +50,11 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.prefs = loadPrefs()
+	// 체크박스/실행 옵션은 업데이트 확인이 끝나길 기다리지 않고 창이 뜨자마자 보여준다 —
+	// 사용자가 다운로드 중에도 "종료 시 실행"류 설정을 미리 켜둘 수 있게 하기 위함. 실제로
+	// 그 선택이 적용되는 시점(완료 버튼 활성화)은 흐름이 "ready"에 도달한 뒤다.
+	runtime.EventsEmit(ctx, "init", a.prefsPayload())
 	go a.run()
 }
 
@@ -51,10 +62,11 @@ func (a *App) startup(ctx context.Context) {
 // 안전한지) 확인한다. 둘 다 아니면 — 즉 TTD와 무관해 보이는 파일들이 섞여 있으면 — false를
 // 반환해 동기화를 막는다. ttd_updater.exe를 엉뚱한 폴더(예: 소스 폴더, 다운로드 폴더)에서
 // 실행했을 때 그 폴더에 TTD 파일들을 쏟아붓는 사고를 막기 위한 안전장치.
+//
+// "기존 설치"로 인정하는 조건은 고정 이름 appExeName("TTD.exe") 하나가 아니라 appExeRe
+// (`^TTD.*\.exe$`) 전체다 — 이 고정-이름 규칙이 생기기 전부터 쓰던 사용자의 폴더에는 아직
+// TTD3.4.1.exe처럼 버전이 붙은 이름 그대로 남아있을 수 있고, 그것도 정당한 기존 설치다.
 func isSafeInstallDir(dir string) (bool, string) {
-	if _, err := os.Stat(filepath.Join(dir, appExeName)); err == nil {
-		return true, "" // 이미 TTD.exe가 있는 기존 설치 폴더
-	}
 	if _, err := os.Stat(versionFile); err == nil {
 		return true, "" // version_info.json이 있으면 과거에 이 도구가 관리하던 폴더
 	}
@@ -65,12 +77,19 @@ func isSafeInstallDir(dir string) (bool, string) {
 	}
 	self := selfExeName()
 	for _, e := range entries {
+		// ttd_updater.exe 자신도 appExeRe(`^TTD.*\.exe$`)에 걸리므로 반드시 제외하고 검사.
+		if !strings.EqualFold(e.Name(), self) && appExeRe.MatchString(e.Name()) {
+			return true, "" // TTD.exe 또는 TTD3.4.1.exe처럼 버전 붙은 기존 실행 파일 발견
+		}
+	}
+	for _, e := range entries {
 		name := e.Name()
 		if strings.EqualFold(name, self) || name == "updater_prefs.json" {
 			continue // 업데이터 자신과 자신이 만든 설정 파일은 무시
 		}
 		return false, "이 폴더에 TTD와 관련 없어 보이는 파일이 있습니다. " +
-			"엉뚱한 폴더에 파일이 섞이지 않도록, TTD.exe가 있는 실제 설치 폴더에서 실행해 주세요."
+			"엉뚱한 폴더에 파일이 섞이지 않도록, TTD 실행 파일(TTD.exe 또는 TTDx.x.x.exe)이 있는 " +
+			"실제 설치 폴더에서 실행해 주세요."
 	}
 	return true, "" // 완전히 빈 폴더 — 새로 설치해도 안전
 }
@@ -97,10 +116,10 @@ func (a *App) status(text string) {
 	}
 }
 
-// ReadyPayload는 업데이트 흐름이 끝났을 때(성공/이미 최신/오류) 프론트엔드로 보내는 최종 상태다.
-type ReadyPayload struct {
-	Message               string `json:"message"`
-	AlreadyLatest         bool   `json:"alreadyLatest"`
+// PrefsPayload는 체크박스/실행 옵션 화면을 그리는 데 필요한 상태다. "init"(창이 뜨자마자,
+// 업데이트 확인 전)과 "ready"(업데이트 확인/적용이 끝난 뒤) 두 이벤트가 이 모양을 공유한다 —
+// 옵션 자체는 업데이트 진행 상황과 무관하게 항상 같은 저장된 prefs를 반영하기 때문이다.
+type PrefsPayload struct {
 	LaunchOnClose         bool   `json:"launchOnClose"`
 	LaunchTTD             bool   `json:"launchTTD"`
 	LaunchGame            bool   `json:"launchGame"`
@@ -110,14 +129,8 @@ type ReadyPayload struct {
 	CreateDesktopShortcut bool   `json:"createDesktopShortcut"`
 }
 
-// finish는 마지막에 한 번만 호출된다. alreadyLatest는 "이미 최신 버전이라 아무 것도 안 함"
-// 케이스만 true로 표시한다 — 프론트엔드가 이 경우에만 자동 종료 카운트다운을 시작한다
-// (실제 업데이트가 있었거나 오류가 났을 때는 사용자가 결과를 확인할 시간이 필요하므로 자동 종료 안 함).
-func (a *App) finish(message string, alreadyLatest bool) {
-	a.prefs = loadPrefs()
-	runtime.EventsEmit(a.ctx, "ready", ReadyPayload{
-		Message:               message,
-		AlreadyLatest:         alreadyLatest,
+func (a *App) prefsPayload() PrefsPayload {
+	return PrefsPayload{
 		LaunchOnClose:         a.prefs.LaunchOnClose,
 		LaunchTTD:             a.prefs.LaunchTTDAfterUpdate,
 		LaunchGame:            a.prefs.LaunchGameAfterUpdate,
@@ -125,6 +138,29 @@ func (a *App) finish(message string, alreadyLatest bool) {
 		GameSteamAppID:        a.prefs.GameSteamAppID,
 		GameClientExePath:     a.prefs.GameClientExePath,
 		CreateDesktopShortcut: a.prefs.CreateDesktopShortcut,
+	}
+}
+
+// ReadyPayload는 업데이트 흐름이 끝났을 때(성공/이미 최신/오류) 프론트엔드로 보내는 최종 상태다.
+type ReadyPayload struct {
+	Message             string `json:"message"`
+	AlreadyLatest       bool   `json:"alreadyLatest"`
+	SelfUpdateAvailable bool   `json:"selfUpdateAvailable"`
+	SelfUpdateVersion   string `json:"selfUpdateVersion"`
+	PrefsPayload
+}
+
+// finish는 마지막에 한 번만 호출된다. alreadyLatest는 "이미 최신 버전이라 아무 것도 안 함"
+// 케이스만 true로 표시한다 — 프론트엔드가 이 경우에만 자동 종료 카운트다운을 시작한다
+// (실제 업데이트가 있었거나 오류가 났을 때는 사용자가 결과를 확인할 시간이 필요하므로 자동 종료 안 함).
+func (a *App) finish(message string, alreadyLatest bool) {
+	a.prefs = loadPrefs()
+	runtime.EventsEmit(a.ctx, "ready", ReadyPayload{
+		Message:             message,
+		AlreadyLatest:       alreadyLatest,
+		SelfUpdateAvailable: a.selfUpdateDownloadURL != "",
+		SelfUpdateVersion:   a.selfUpdateVersion,
+		PrefsPayload:        a.prefsPayload(),
 	})
 }
 
@@ -150,6 +186,17 @@ func pickHighestVersion(cands []zipCandidate) zipCandidate {
 // 어느 경로로 끝나든 마지막에 a.finish()를 호출해 프론트엔드를 체크박스 화면으로 전환시킨다.
 func (a *App) run() {
 	cleanupStaleTempDirs()
+
+	a.status(fmt.Sprintf("ttd_updater v%s", updaterVersion))
+
+	// ttd_updater 자신의 새 버전 확인은 TTD 본체 업데이트와 완전히 무관한 부가 기능이라,
+	// 실패해도(네트워크 문제, API 오류 등) 조용히 넘어가고 본 흐름을 막지 않는다.
+	if v, url, size, ok := checkSelfUpdate(); ok {
+		a.selfUpdateVersion = v
+		a.selfUpdateDownloadURL = url
+		a.selfUpdateSize = size
+		a.status(fmt.Sprintf("ttd_updater 새 버전(v%s)이 있습니다.", v))
+	}
 
 	a.status("=== 구글 드라이브 업데이트 확인 중 ===")
 	localVer := getLocalVersion()
@@ -291,8 +338,10 @@ func (a *App) SaveGameSetup(method, steamAppID, clientExePath string) {
 // 다른 축이다 — launchTTDNow/launchGameNow는 "TTD/게임 중 무엇을 대상으로 할지" 선택이고,
 // launchOnClose는 "이번에 닫을 때 그 선택을 실제로 실행할지"이다. 후자가 꺼져 있으면
 // 대상이 체크돼 있어도 아무 것도 실행하지 않는다. createShortcutNow는 둘과 무관하게
-// "닫을 때 바탕화면 바로가기도 만들지" 여부다(실행 여부와 별개 축).
-func (a *App) Confirm(launchOnClose, launchTTDNow, launchGameNow, createShortcutNow bool) {
+// "닫을 때 바탕화면 바로가기도 만들지" 여부다(실행 여부와 별개 축). installSelfUpdateNow는
+// prefs로 저장하지 않는다 — 이건 "지금 감지된 이 특정 버전을 설치할지"에 대한 일회성
+// 선택이지, 매번 반복할 일반 설정이 아니기 때문이다.
+func (a *App) Confirm(launchOnClose, launchTTDNow, launchGameNow, createShortcutNow, installSelfUpdateNow bool) {
 	a.prefs.LaunchOnClose = launchOnClose
 	a.prefs.LaunchTTDAfterUpdate = launchTTDNow
 	a.prefs.LaunchGameAfterUpdate = launchGameNow
@@ -310,6 +359,15 @@ func (a *App) Confirm(launchOnClose, launchTTDNow, launchGameNow, createShortcut
 
 	if createShortcutNow {
 		_ = createDesktopShortcut()
+	}
+
+	if installSelfUpdateNow && a.selfUpdateDownloadURL != "" {
+		a.status("ttd_updater 새 버전 내려받는 중...")
+		if newPath, err := downloadSelfUpdate(a.selfUpdateDownloadURL, a.selfUpdateSize); err != nil {
+			a.status(fmt.Sprintf("[오류 발생] ttd_updater 업데이트 실패: %v", err))
+		} else if err := installSelfUpdateAndExit(newPath); err != nil {
+			a.status(fmt.Sprintf("[오류 발생] ttd_updater 교체 준비 실패: %v", err))
+		}
 	}
 
 	runtime.Quit(a.ctx)

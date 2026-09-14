@@ -213,6 +213,15 @@ button.primary:hover {
   background: var(--accent-hover);
 }
 
+button:disabled,
+button.primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+  background: var(--card-bg);
+  color: var(--muted);
+  border-color: var(--border);
+}
+
 button.link-btn {
   background: none;
   border: none;

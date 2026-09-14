@@ -3,7 +3,7 @@
 
 export function BrowseForGameExe():Promise<string>;
 
-export function Confirm(arg1:boolean,arg2:boolean,arg3:boolean,arg4:boolean):Promise<void>;
+export function Confirm(arg1:boolean,arg2:boolean,arg3:boolean,arg4:boolean,arg5:boolean):Promise<void>;
 
 export function DefaultClientExePath():Promise<string>;
 

@@ -1,7 +1,6 @@
 const logEl = document.getElementById("log");
 const headerText = document.getElementById("headerText");
 const statusDot = document.getElementById("statusDot");
-const doneView = document.getElementById("doneView");
 
 const launchOnClose = document.getElementById("launchOnClose");
 const launchTargets = document.getElementById("launchTargets");
@@ -18,7 +17,11 @@ const gameSetupSave = document.getElementById("gameSetupSave");
 const confirmBtn = document.getElementById("confirmBtn");
 const gameMethodSummary = document.getElementById("gameMethodSummary");
 const autoCloseHint = document.getElementById("autoCloseHint");
+const waitingHint = document.getElementById("waitingHint");
 const createShortcut = document.getElementById("createShortcut");
+const selfUpdateSection = document.getElementById("selfUpdateSection");
+const installSelfUpdate = document.getElementById("installSelfUpdate");
+const selfUpdateLabel = document.getElementById("selfUpdateLabel");
 
 let savedMethod = null;
 let autoCloseTimer = null;
@@ -56,7 +59,13 @@ function startAutoClose(seconds) {
     autoCloseRemaining -= 1;
     if (autoCloseRemaining <= 0) {
       cancelAutoClose();
-      window.go.main.App.Confirm(launchOnClose.checked, launchTTD.checked, launchGame.checked, createShortcut.checked);
+      window.go.main.App.Confirm(
+        launchOnClose.checked,
+        launchTTD.checked,
+        launchGame.checked,
+        createShortcut.checked,
+        installSelfUpdate.checked
+      );
       return;
     }
     autoCloseHint.textContent = `${autoCloseRemaining}초 후 자동 종료...`;
@@ -75,6 +84,7 @@ launchTTD.addEventListener("change", cancelAutoClose);
 launchGame.addEventListener("change", cancelAutoClose);
 launchOnClose.addEventListener("change", cancelAutoClose);
 createShortcut.addEventListener("change", cancelAutoClose);
+installSelfUpdate.addEventListener("change", cancelAutoClose);
 confirmBtn.addEventListener("mouseenter", cancelAutoClose);
 gameSetupBtn.addEventListener("mouseenter", cancelAutoClose);
 
@@ -113,13 +123,10 @@ window.runtime.EventsOn("status", (text) => {
   headerText.textContent = text.replace(/^>>\s*/, "").replace(/^\[.*?\]\s*/, "");
 });
 
-window.runtime.EventsOn("ready", (payload) => {
-  const isError = payload.message.includes("오류");
-  statusDot.className = "dot " + (isError ? "error" : "done");
-  headerText.textContent = payload.message;
-
-  doneView.hidden = false;
-
+// "init"(업데이트 확인이 시작되기도 전, 창이 뜨자마자)과 "ready"(업데이트 확인/적용이 끝난 뒤)
+// 둘 다 같은 모양의 체크박스 상태를 담고 있어서 반영 로직을 공유한다 — 옵션 자체는 진행 상황과
+// 무관하게 항상 저장된 값을 그대로 보여주면 되기 때문이다.
+function applyPrefsPayload(payload) {
   launchOnClose.checked = payload.launchOnClose;
   launchTTD.checked = payload.launchTTD;
   launchGame.checked = payload.launchGame;
@@ -132,6 +139,32 @@ window.runtime.EventsOn("ready", (payload) => {
   steamAppId.value = payload.gameSteamAppID || DEFAULT_STEAM_APP_ID;
   clientExePath.value = payload.gameClientExePath || "";
   refreshMethodSummary();
+}
+
+// 창이 뜨자마자(업데이트 확인이 끝나길 기다리지 않고) 옵션들을 미리 보여준다. "완료" 버튼은
+// 아직 비활성 상태 — 실제로 닫아도 되는 시점(ready)이 되면 활성화된다.
+window.runtime.EventsOn("init", (payload) => {
+  applyPrefsPayload(payload);
+  resizeWindowToContent();
+});
+
+window.runtime.EventsOn("ready", (payload) => {
+  const isError = payload.message.includes("오류");
+  statusDot.className = "dot " + (isError ? "error" : "done");
+  headerText.textContent = payload.message;
+
+  applyPrefsPayload(payload);
+  confirmBtn.disabled = false;
+  waitingHint.hidden = true;
+
+  if (payload.selfUpdateAvailable) {
+    selfUpdateSection.hidden = false;
+    selfUpdateLabel.textContent = `ttd_updater 새 버전(v${payload.selfUpdateVersion}) 설치`;
+  } else {
+    selfUpdateSection.hidden = true;
+    installSelfUpdate.checked = false;
+  }
+
   resizeWindowToContent();
 
   if (payload.alreadyLatest) {
@@ -185,5 +218,11 @@ confirmBtn.addEventListener("click", async () => {
     alert("먼저 토치라이트 실행 방식을 설정해 주세요.");
     return;
   }
-  await window.go.main.App.Confirm(launchOnClose.checked, launchTTD.checked, launchGame.checked, createShortcut.checked);
+  await window.go.main.App.Confirm(
+    launchOnClose.checked,
+    launchTTD.checked,
+    launchGame.checked,
+    createShortcut.checked,
+    installSelfUpdate.checked
+  );
 });

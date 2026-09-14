@@ -6,8 +6,8 @@ export function BrowseForGameExe() {
   return window['go']['main']['App']['BrowseForGameExe']();
 }
 
-export function Confirm(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['Confirm'](arg1, arg2, arg3, arg4);
+export function Confirm(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['Confirm'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function DefaultClientExePath() {

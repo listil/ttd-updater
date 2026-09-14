@@ -16,7 +16,7 @@ func main() {
 	app := NewApp()
 
 	err := wails.Run(&options.App{
-		Title:  "TTD 업데이트",
+		Title:  "TTD 업데이트 v" + updaterVersion,
 		Width:  440,
 		Height: 480,
 		AssetServer: &assetserver.Options{
