@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TTD 업데이트</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="titlebar">
+      <span class="dot" id="statusDot"></span>
+      <span id="headerText">TTD 업데이트 확인 중...</span>
+    </header>
+
+    <div id="log" class="log"></div>
+
+    <div id="doneView" class="actions-panel" hidden>
+      <label class="row">
+        <input type="checkbox" id="launchOnClose" />
+        <span>종료 시 아래에서 선택한 항목 실행</span>
+      </label>
+
+      <div id="launchTargets" class="indent-block">
+        <label class="row">
+          <input type="checkbox" id="launchTTD" />
+          <span>TTD</span>
+        </label>
+
+        <div class="row space-between">
+          <label class="row">
+            <input type="checkbox" id="launchGame" />
+            <span>토치라이트</span>
+          </label>
+          <button id="gameSetupBtn" class="link-btn" type="button">실행 방식 설정</button>
+        </div>
+        <p id="gameMethodSummary" class="hint"></p>
+      </div>
+
+      <div id="gameSetupPanel" class="panel" hidden>
+        <label class="radio-row">
+          <input type="radio" name="method" id="methodSteam" value="steam" />
+          Steam으로 실행
+        </label>
+        <div class="field indent">
+          <label for="steamAppId">Steam App ID</label>
+          <input type="text" id="steamAppId" placeholder="예: 123456" />
+        </div>
+
+        <label class="radio-row">
+          <input type="radio" name="method" id="methodClient" value="client" />
+          공식 클라이언트로 실행
+        </label>
+        <div class="field indent">
+          <label for="clientExePath">실행 파일</label>
+          <div class="row">
+            <input type="text" id="clientExePath" readonly placeholder="파일을 선택하세요" />
+            <button id="browseBtn" type="button">찾아보기...</button>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="gameSetupSave" class="primary" type="button">저장</button>
+        </div>
+      </div>
+
+      <div class="section-divider"></div>
+      <label class="row">
+        <input type="checkbox" id="createShortcut" />
+        <span>바탕화면에 TTD 바로가기 만들기</span>
+      </label>
+
+      <div class="actions">
+        <span id="autoCloseHint" class="hint autoclose" hidden></span>
+        <button id="confirmBtn" class="primary" type="button">완료</button>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

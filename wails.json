@@ -1,0 +1,8 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "ttd_updater",
+  "outputfilename": "ttd_updater",
+  "frontend:install": "",
+  "frontend:build": "",
+  "wailsjsdir": "frontend"
+}
