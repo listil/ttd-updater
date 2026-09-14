@@ -47,6 +47,48 @@ func (a *App) startup(ctx context.Context) {
 	go a.run()
 }
 
+// isSafeInstallDir는 targetDir가 TTD 설치 폴더로 보이는지(또는 완전히 비어 있어 새로 설치해도
+// 안전한지) 확인한다. 둘 다 아니면 — 즉 TTD와 무관해 보이는 파일들이 섞여 있으면 — false를
+// 반환해 동기화를 막는다. ttd_updater.exe를 엉뚱한 폴더(예: 소스 폴더, 다운로드 폴더)에서
+// 실행했을 때 그 폴더에 TTD 파일들을 쏟아붓는 사고를 막기 위한 안전장치.
+func isSafeInstallDir(dir string) (bool, string) {
+	if _, err := os.Stat(filepath.Join(dir, appExeName)); err == nil {
+		return true, "" // 이미 TTD.exe가 있는 기존 설치 폴더
+	}
+	if _, err := os.Stat(versionFile); err == nil {
+		return true, "" // version_info.json이 있으면 과거에 이 도구가 관리하던 폴더
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Sprintf("폴더를 확인할 수 없습니다: %v", err)
+	}
+	self := selfExeName()
+	for _, e := range entries {
+		name := e.Name()
+		if strings.EqualFold(name, self) || name == "updater_prefs.json" {
+			continue // 업데이터 자신과 자신이 만든 설정 파일은 무시
+		}
+		return false, "이 폴더에 TTD와 관련 없어 보이는 파일이 있습니다. " +
+			"엉뚱한 폴더에 파일이 섞이지 않도록, TTD.exe가 있는 실제 설치 폴더에서 실행해 주세요."
+	}
+	return true, "" // 완전히 빈 폴더 — 새로 설치해도 안전
+}
+
+// cleanupStaleTempDirs는 이전 실행이 다운로드 도중 강제 종료돼 남긴 임시 폴더를 정리한다.
+// 정상 종료 시에는 run()의 defer os.RemoveAll(tempDir)가 처리하지만, 프로세스가 그냥
+// kill되면 defer가 실행되지 않아 %TEMP%\gdrive_update_* 폴더가 그대로 남는다 — 다음 실행
+// 시작 시 한 번씩 정리해서 쌓이지 않게 한다. 실패해도 치명적이지 않으므로 에러는 무시한다.
+func cleanupStaleTempDirs() {
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "gdrive_update_*"))
+	if err != nil {
+		return
+	}
+	for _, m := range matches {
+		_ = os.RemoveAll(m)
+	}
+}
+
 // status는 콘솔(터미널에서 실행했을 때를 위해)과 프론트엔드 양쪽에 진행 상황을 알린다.
 func (a *App) status(text string) {
 	fmt.Println(text)
@@ -107,6 +149,8 @@ func pickHighestVersion(cands []zipCandidate) zipCandidate {
 // run은 버전 확인 -> (필요 시) 다운로드/적용까지의 업데이트 흐름 전체를 수행하고,
 // 어느 경로로 끝나든 마지막에 a.finish()를 호출해 프론트엔드를 체크박스 화면으로 전환시킨다.
 func (a *App) run() {
+	cleanupStaleTempDirs()
+
 	a.status("=== 구글 드라이브 업데이트 확인 중 ===")
 	localVer := getLocalVersion()
 	a.status(fmt.Sprintf("현재 로컬 버전: %s", localVer))
@@ -160,6 +204,14 @@ func (a *App) run() {
 	if remoteVer == "" && !isNewerVersion(target.ver, localVer) {
 		a.status(">> 이미 최신 버전을 사용 중입니다.")
 		a.finish("이미 최신 버전을 사용 중입니다.", true)
+		return
+	}
+
+	// 실제로 파일을 받아 적용하기 전, targetDir가 TTD 설치 폴더가 맞는지(또는 비어 있는지)
+	// 확인한다 — 엉뚱한 폴더(소스 폴더, 다운로드 폴더 등)에서 실행됐다면 여기서 중단.
+	if safe, reason := isSafeInstallDir(targetDir); !safe {
+		a.status(fmt.Sprintf("[중단] %s", reason))
+		a.finish(reason, false)
 		return
 	}
 
