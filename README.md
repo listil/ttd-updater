@@ -1,38 +1,38 @@
 # ttd-updater
 
-A small Windows utility that checks a Google Drive folder for the latest release of
-[TTD (Torchlight Tracker Diablo)](https://ttdiablo.com) — a fan-made companion tool for
-*Torchlight: Infinite* — and downloads/applies it if a newer version is available.
+[TTD (Torchlight Tracker Diablo)](https://ttdiablo.com) — *Torchlight: Infinite* 팬메이드 동행 도구인
+TTD의 업데이트 확인/적용 유틸리티입니다. 구글드라이브에 새 버전이 올라와 있는지 확인하고, 있으면
+자동으로 내려받아 적용해줍니다.
 
-This tool does not build or distribute TTD itself. TTD's releases are published and maintained
-separately by its own team; this utility only checks that existing public Google Drive folder and
-automates the "download the new zip and copy it over my install" step.
+이 도구는 TTD 앱 자체를 만들거나 배포하지 않습니다. TTD 본체는 별도로 관리/배포되고 있고, 이 유틸리티는
+그 구글드라이브 폴더를 확인해서 "새 zip 받아서 내 설치 폴더에 덮어쓰기"를 자동화해주는 역할만 합니다.
 
-## What it does
+## 사용법
 
-1. Checks the local install for its current version (`version_info.json`, or a versioned filename
-   if present).
-2. Scrapes the public Google Drive folder's page for the newest `TTD*.zip` and compares versions.
-3. If newer, downloads just that one file (not the whole Drive folder), extracts it, and syncs it
-   onto the install directory — the main app executable is always written under a fixed name
-   (`TTD.exe`) regardless of the versioned filename inside the zip, so a desktop shortcut to it
-   never breaks across updates.
-4. Shows a small window with the result and optional "launch TTD / launch the game now" checkboxes,
-   plus an option to (re)create a desktop shortcut.
+1. [Releases](https://github.com/listil/ttd-updater/releases)에서 최신 `ttd_updater.exe`를 받습니다.
+2. **TTD.exe가 있는 폴더(설치 폴더)에 넣고 그 자리에서 실행**합니다. 다른 폴더에서 실행하면 그 폴더를
+   설치 위치로 착각해서 엉뚱한 곳에 파일을 받습니다.
+3. 창이 뜨면서 버전을 확인합니다.
+   - 새 버전이 있으면 자동으로 다운로드/적용됩니다.
+   - 이미 최신 버전이면 5초 뒤 창이 저절로 닫힙니다(체크박스를 만지거나 버튼에 마우스를 올리면 취소됨).
 
-## Building
+### 완료 화면 옵션
 
-Requires Go and the [Wails v2](https://wails.io) CLI:
+- **종료 시 아래에서 선택한 항목 실행**: 체크해두면 창이 닫힐 때 아래서 고른 걸 바로 실행합니다.
+  - **TTD**: `TTD.exe` 실행
+  - **토치라이트**: 게임을 바로 실행. "실행 방식 설정"에서 Steam(App ID) 또는 공식 클라이언트(설치 경로)
+    중 하나를 골라 저장해두면 됩니다.
+- **바탕화면에 TTD 바로가기 만들기**: 체크하면 바탕화면에 TTD 바로가기(`TTD.lnk`)를 만들어줍니다.
+  실행 파일 이름이 항상 고정돼 있어서, 나중에 또 업데이트해도 이 바로가기를 다시 만들 필요 없이 계속
+  최신 버전을 가리킵니다.
 
-```
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
-wails build -clean
-```
+체크박스 상태는 한 번 정해두면 다음 실행 때도 그대로 기억됩니다(최초 실행 시에는 모두 꺼져 있음).
 
-The compiled binary is written to `build/bin/ttd_updater.exe`. Building with plain `go build`
-instead of the Wails CLI will produce a broken exe — see `CLAUDE.md` for why.
+## 문제가 있다면
 
-## Stack
+- 실행했는데 아무 반응이 없거나 창이 안 뜬다면, TTD.exe와 같은 폴더에서 실행했는지 먼저 확인해주세요.
+- 그 외 문제는 [Issues](https://github.com/listil/ttd-updater/issues)에 남겨주세요.
 
-Go backend, no cgo. Frontend is plain HTML/CSS/JS (no bundler) rendered in a WebView2 window —
-no bundled browser engine, just the one already on Windows 10/11.
+---
+
+개발 관련 내용(빌드 방법, 구조 등)은 소스 코드를 참고하세요.
