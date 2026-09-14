@@ -13,7 +13,7 @@ import (
 
 // updaterVersion은 이 빌드 자신의 버전이다. GitHub Release 태그(vX.Y.Z)를 새로 발행할 때마다
 // 수동으로 맞춰 올려야 한다 — TTD 본체의 version_info.json/버전 체계와는 완전히 별개다.
-const updaterVersion = "1.2.0"
+const updaterVersion = "1.2.1"
 
 const updaterRepo = "listil/ttd-updater"
 

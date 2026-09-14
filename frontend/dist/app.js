@@ -159,7 +159,7 @@ window.runtime.EventsOn("ready", (payload) => {
 
   if (payload.selfUpdateAvailable) {
     selfUpdateSection.hidden = false;
-    selfUpdateLabel.textContent = `ttd_updater 새 버전(v${payload.selfUpdateVersion}) 설치`;
+    selfUpdateLabel.textContent = `종료 시 ttd_updater 새 버전(v${payload.selfUpdateVersion}) 설치`;
   } else {
     selfUpdateSection.hidden = true;
     installSelfUpdate.checked = false;
