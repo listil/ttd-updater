@@ -55,6 +55,14 @@ func migrateToFixedAppExe(dir, selfExe string) (string, error) {
 	if old == "" {
 		return "", nil
 	}
+	// getLocalVersion은 이 파일명(TTD3.4.1.exe)의 버전을 version_info.json보다 우선해서 읽는다.
+	// 이름을 바꾸면 그 출처가 사라져 (version_info.json이 없던 폴더는) 0.0.0으로 떨어지고, 이미
+	// 최신인데도 다운로드를 다시 받게 된다 — 그래서 바꾸기 전에 같은 버전을 먼저 기록해 둔다.
+	if ver := versionFromName(old); ver != "0.0.0" {
+		if err := saveLocalVersion(ver); err != nil {
+			return old, err
+		}
+	}
 	if err := os.Rename(filepath.Join(dir, old), filepath.Join(dir, appExeName)); err != nil {
 		return old, err
 	}
