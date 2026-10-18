@@ -189,6 +189,14 @@ func (a *App) run() {
 
 	a.status(fmt.Sprintf("ttd_updater v%s", updaterVersion))
 
+	// 버전 붙은 TTD3.x.x.exe만 있는 옛 폴더를 고정 이름 TTD.exe로 맞춘다 — 업데이트가 없어도
+	// 바로가기/"종료 시 TTD 실행"이 TTD.exe를 찾을 수 있게.
+	if old, err := migrateToFixedAppExe(targetDir, selfExeName()); err != nil {
+		a.status(fmt.Sprintf("[경고] %s → %s 이름 변경 실패(TTD 실행 중이면 종료 후 다시 시도): %v", old, appExeName, err))
+	} else if old != "" {
+		a.status(fmt.Sprintf("%s → %s 로 이름을 고정했습니다.", old, appExeName))
+	}
+
 	// ttd_updater 자신의 새 버전 확인은 TTD 본체 업데이트와 완전히 무관한 부가 기능이라,
 	// 실패해도(네트워크 문제, API 오류 등) 조용히 넘어가고 본 흐름을 막지 않는다.
 	if v, url, size, ok := checkSelfUpdate(); ok {
@@ -348,9 +356,14 @@ func (a *App) Confirm(launchOnClose, launchTTDNow, launchGameNow, createShortcut
 	a.prefs.CreateDesktopShortcut = createShortcutNow
 	_ = savePrefs(a.prefs)
 
+	// 실패를 조용히 삼키면 사용자는 "완료를 눌러도 아무 반응이 없다"고만 느끼게 되므로,
+	// 창을 닫기 전에 무엇이 왜 실패했는지 대화상자로 보여준다.
+	var problems []string
 	if launchOnClose {
 		if launchTTDNow {
-			launchTTD()
+			if err := launchTTD(); err != nil {
+				problems = append(problems, fmt.Sprintf("TTD 실행 실패: %v", err))
+			}
 		}
 		if launchGameNow && a.prefs.GameLaunchMethod != "" {
 			launchGame(a.prefs)
@@ -358,7 +371,20 @@ func (a *App) Confirm(launchOnClose, launchTTDNow, launchGameNow, createShortcut
 	}
 
 	if createShortcutNow {
-		_ = createDesktopShortcut()
+		if err := createDesktopShortcut(); err != nil {
+			problems = append(problems, fmt.Sprintf("바탕화면 바로가기 생성 실패: %v", err))
+		}
+	}
+
+	if len(problems) > 0 {
+		for _, p := range problems {
+			a.status("[오류 발생] " + p)
+		}
+		_, _ = runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
+			Type:    runtime.ErrorDialog,
+			Title:   "ttd_updater",
+			Message: strings.Join(problems, "\n\n"),
+		})
 	}
 
 	if installSelfUpdateNow && a.selfUpdateDownloadURL != "" {

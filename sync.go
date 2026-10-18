@@ -19,6 +19,61 @@ var (
 	appExeRe   = regexp.MustCompile(`(?i)^TTD.*\.exe$`)
 )
 
+// findVersionedAppExe는 dir에서 고정 이름(TTD.exe)이 아닌, TTD3.4.1.exe처럼 버전이 붙은 앱
+// 실행 파일 중 가장 높은 버전의 이름을 찾는다(없으면 ""). 업데이터 자신(selfExe)은 제외.
+func findVersionedAppExe(dir, selfExe string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var cands []zipCandidate
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || strings.EqualFold(name, appExeName) || (selfExe != "" && strings.EqualFold(name, selfExe)) {
+			continue
+		}
+		if appExeRe.MatchString(name) {
+			cands = append(cands, zipCandidate{name: name, ver: versionFromName(name)})
+		}
+	}
+	if len(cands) == 0 {
+		return ""
+	}
+	return pickHighestVersion(cands).name
+}
+
+// migrateToFixedAppExe는 고정-이름 규칙이 생기기 전부터 쓰던 폴더(TTD.exe 없이 TTD3.4.1.exe만
+// 있는 폴더)를 TTD.exe로 이름을 바꿔 맞춘다. 업데이트가 실제로 적용될 때만 syncExtractedFiles가
+// 이름을 고정해 주므로, "이미 최신 버전"인 사용자는 이게 없으면 영원히 TTD.exe가 생기지 않아
+// 바탕화면 바로가기가 깨지고 "종료 시 TTD 실행"도 조용히 아무것도 안 하게 된다.
+// 바꾼 경우 원래 파일명을, 아무것도 안 했으면 ""를 반환한다.
+func migrateToFixedAppExe(dir, selfExe string) (string, error) {
+	if _, err := os.Stat(filepath.Join(dir, appExeName)); err == nil {
+		return "", nil
+	}
+	old := findVersionedAppExe(dir, selfExe)
+	if old == "" {
+		return "", nil
+	}
+	if err := os.Rename(filepath.Join(dir, old), filepath.Join(dir, appExeName)); err != nil {
+		return old, err
+	}
+	return old, nil
+}
+
+// resolveAppExePath는 실제로 실행할 앱 exe 경로를 돌려준다: TTD.exe가 있으면 그것, 이름 변경이
+// 실패해 버전 붙은 파일만 남아있으면 그것, 둘 다 없으면 "".
+func resolveAppExePath(dir, selfExe string) string {
+	fixed := filepath.Join(dir, appExeName)
+	if _, err := os.Stat(fixed); err == nil {
+		return fixed
+	}
+	if old := findVersionedAppExe(dir, selfExe); old != "" {
+		return filepath.Join(dir, old)
+	}
+	return ""
+}
+
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {

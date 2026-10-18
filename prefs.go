@@ -43,14 +43,21 @@ func savePrefs(p Prefs) error {
 	return os.WriteFile(prefsFile, data, 0644)
 }
 
-func launchTTD() {
-	exePath := filepath.Join(targetDir, appExeName)
-	if _, err := os.Stat(exePath); err != nil {
-		return
+// appExeNotFound는 targetDir에 TTD.exe도, 버전 붙은 TTD*.exe도 없을 때의 오류다 —
+// 대개 ttd_updater.exe를 TTD 설치 폴더가 아닌 곳에서 실행했다는 뜻이다.
+func appExeNotFound() error {
+	return fmt.Errorf("이 폴더(%s)에서 TTD 실행 파일을 찾지 못했습니다. "+
+		"ttd_updater.exe를 TTD.exe가 있는 설치 폴더에서 실행해 주세요", targetDir)
+}
+
+func launchTTD() error {
+	exePath := resolveAppExePath(targetDir, selfExeName())
+	if exePath == "" {
+		return appExeNotFound()
 	}
 	cmd := exec.Command(exePath)
 	cmd.Dir = targetDir
-	_ = cmd.Start()
+	return cmd.Start()
 }
 
 // createDesktopShortcut은 바탕화면에 TTD.exe로 연결되는 "TTD.lnk"를 만든다(있으면 덮어씀).
@@ -62,7 +69,12 @@ func createDesktopShortcut() error {
 	if err != nil {
 		return err
 	}
-	exePath := filepath.Join(targetDir, appExeName)
+	// 존재하지 않는 대상으로도 .lnk는 만들어지므로(그러면 "항목이 변경되었거나 옮겨졌다"는
+	// 깨진 바로가기가 됨), 실제 파일이 있는지 먼저 확인한다.
+	exePath := resolveAppExePath(targetDir, selfExeName())
+	if exePath == "" {
+		return appExeNotFound()
+	}
 	shortcutPath := filepath.Join(homeDir, "Desktop", "TTD.lnk")
 
 	script := fmt.Sprintf(
