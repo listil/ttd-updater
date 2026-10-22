@@ -123,6 +123,15 @@ window.runtime.EventsOn("status", (text) => {
   headerText.textContent = text.replace(/^>>\s*/, "").replace(/^\[.*?\]\s*/, "");
 });
 
+// 다운로드 직전에 한 번 오는 업데이트 노트(새 버전 섹션들). 진행 상황 줄과 구분되게 따로
+// 스타일을 주고, 상단 상태 텍스트는 건드리지 않는다.
+window.runtime.EventsOn("notes", (lines) => {
+  for (const text of lines) {
+    const isHead = text.startsWith("===") || /^\s*▶/.test(text);
+    appendLine(text, isHead ? "note note-head" : "note");
+  }
+});
+
 // "init"(업데이트 확인이 시작되기도 전, 창이 뜨자마자)과 "ready"(업데이트 확인/적용이 끝난 뒤)
 // 둘 다 같은 모양의 체크박스 상태를 담고 있어서 반영 로직을 공유한다 — 옵션 자체는 진행 상황과
 // 무관하게 항상 저장된 값을 그대로 보여주면 되기 때문이다.

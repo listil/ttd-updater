@@ -270,6 +270,14 @@ func (a *App) run() {
 		return
 	}
 
+	// 다운로드가 진행되는 동안 읽을 수 있도록, 받기 전에 이번에 바뀌는 내용을 먼저 보여준다.
+	if notes := fetchReleaseNotes(localVer); notes != nil {
+		for _, line := range notes {
+			fmt.Println(line)
+		}
+		runtime.EventsEmit(a.ctx, "notes", notes)
+	}
+
 	a.status(fmt.Sprintf("파일 다운로드 중... (%s)", target.name))
 	zipPath := filepath.Join(tempDir, target.name)
 	if err := downloadDriveFile(target.id, zipPath, client); err != nil {
