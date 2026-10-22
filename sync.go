@@ -15,9 +15,24 @@ import (
 const appExeName = "TTD.exe"
 
 var (
-	ttdAssetRe = regexp.MustCompile(`(?i)TTD.*`)
-	appExeRe   = regexp.MustCompile(`(?i)^TTD.*\.exe$`)
+	ttdAssetRe   = regexp.MustCompile(`(?i)TTD.*`)
+	appExeRe     = regexp.MustCompile(`(?i)^TTD.*\.exe$`)
+	updaterExeRe = regexp.MustCompile(`(?i)^ttd_updater.*\.exe$`)
 )
+
+// isUpdaterExe는 이 업데이터 자신의 실행 파일(ttd_updater.exe, 다운로드 중복 이름인
+// "ttd_updater (1).exe" 등)인지 판별한다. 업데이터는 GitHub Releases로 따로 자체 업데이트하므로
+// TTD zip에 들어 있는 사본은 설치하지 않는다.
+func isUpdaterExe(name string) bool {
+	return updaterExeRe.MatchString(name)
+}
+
+// isAppExeFile은 TTD 본체 실행 파일(TTD.exe, TTD3.4.6.exe 등)인지 판별한다. ttd_updater.exe도
+// 이름이 "ttd"로 시작해 appExeRe에 걸리므로 반드시 빼야 한다 — 빼지 않으면 실행 중인 업데이터의
+// 이름이 달라 selfExe 제외가 안 먹는 경우 zip의 ttd_updater.exe가 TTD.exe를 덮어쓴다.
+func isAppExeFile(name string) bool {
+	return appExeRe.MatchString(name) && !isUpdaterExe(name)
+}
 
 // alwaysOverwrite는 이미 있어도 항상 zip의 것으로 덮어쓰는 파일들(설치 폴더 기준 상대 경로,
 // 소문자, / 구분). 기본 규칙은 "없으면 추가, 있으면 그대로"(사용자 데이터 보호)지만, 이 파일들은
@@ -42,7 +57,7 @@ func findVersionedAppExe(dir, selfExe string) string {
 		if e.IsDir() || strings.EqualFold(name, appExeName) || (selfExe != "" && strings.EqualFold(name, selfExe)) {
 			continue
 		}
-		if appExeRe.MatchString(name) {
+		if isAppExeFile(name) {
 			cands = append(cands, zipCandidate{name: name, ver: versionFromName(name)})
 		}
 	}
@@ -138,7 +153,11 @@ func syncExtractedFiles(srcDir, dstDir, selfExe string) error {
 		}
 
 		fileName := d.Name()
-		if fileName == "version_info.json" || (selfExe != "" && strings.EqualFold(fileName, selfExe)) {
+		// zip에 함께 들어 있는 업데이터 사본(ttd_updater.exe)은 설치하지 않는다 — 실행 중인 자기
+		// 자신이라 덮어쓸 수도 없고, 업데이터 버전 관리는 GitHub Releases 자체 업데이트가 맡는다.
+		// selfExe 비교는 업데이터를 아예 다른 이름(예: "업데이터.exe")으로 바꿔 실행한 경우용.
+		if fileName == "version_info.json" || isUpdaterExe(fileName) ||
+			(selfExe != "" && strings.EqualFold(fileName, selfExe)) {
 			return nil
 		}
 
@@ -154,7 +173,7 @@ func syncExtractedFiles(srcDir, dstDir, selfExe string) error {
 		// (pet/ttd_1.webp, sound/ttd1.wav 같은 다른 하위 폴더의 TTD 자산은 계속 덮어쓴다.)
 		isStateDir := strings.EqualFold(strings.SplitN(filepath.ToSlash(rel), "/", 2)[0], "json")
 		isTTDAsset := ttdAssetRe.MatchString(fileName) && !isStateDir
-		isAppExe := appExeRe.MatchString(fileName)
+		isAppExe := isAppExeFile(fileName)
 
 		if isAppExe {
 			dstFilePath := filepath.Join(targetRoot, appExeName)
@@ -174,7 +193,7 @@ func syncExtractedFiles(srcDir, dstDir, selfExe string) error {
 				if selfExe != "" && strings.EqualFold(oldName, selfExe) {
 					continue
 				}
-				if appExeRe.MatchString(oldName) {
+				if isAppExeFile(oldName) {
 					if rmErr := os.Remove(filepath.Join(targetRoot, oldName)); rmErr == nil {
 						fmt.Printf("[구버전 삭제] %s\n", oldName)
 					}

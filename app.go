@@ -97,8 +97,9 @@ func isSafeInstallDir(dir string) (bool, string) {
 	}
 	self := selfExeName()
 	for _, e := range entries {
-		// ttd_updater.exe 자신도 appExeRe(`^TTD.*\.exe$`)에 걸리므로 반드시 제외하고 검사.
-		if !strings.EqualFold(e.Name(), self) && appExeRe.MatchString(e.Name()) {
+		// ttd_updater.exe 자신도 appExeRe(`^TTD.*\.exe$`)에 걸리므로 반드시 제외하고 검사
+		// (isAppExeFile이 ttd_updater*.exe를 빼고, self 비교는 아예 다른 이름으로 바꾼 경우용).
+		if !strings.EqualFold(e.Name(), self) && isAppExeFile(e.Name()) {
 			return true, "" // TTD.exe 또는 TTD3.4.1.exe처럼 버전 붙은 기존 실행 파일 발견
 		}
 	}
