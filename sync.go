@@ -19,6 +19,16 @@ var (
 	appExeRe   = regexp.MustCompile(`(?i)^TTD.*\.exe$`)
 )
 
+// alwaysOverwrite는 이미 있어도 항상 zip의 것으로 덮어쓰는 파일들(설치 폴더 기준 상대 경로,
+// 소문자, / 구분). 기본 규칙은 "없으면 추가, 있으면 그대로"(사용자 데이터 보호)지만, 이 파일들은
+// 사용자 데이터가 아니라 배포본이 갱신하는 참조 데이터다 — TTD_ver_note.txt는 TTD가 업데이트
+// 확인에 쓰고, map.dat/map_alias.dat는 맵 DB라 새 시즌 맵이 반영되려면 교체돼야 한다.
+var alwaysOverwrite = map[string]bool{
+	"ttd_ver_note.txt":   true,
+	"json/map.dat":       true,
+	"json/map_alias.dat": true,
+}
+
 // findVersionedAppExe는 dir에서 고정 이름(TTD.exe)이 아닌, TTD3.4.1.exe처럼 버전이 붙은 앱
 // 실행 파일 중 가장 높은 버전의 이름을 찾는다(없으면 ""). 업데이터 자신(selfExe)은 제외.
 func findVersionedAppExe(dir, selfExe string) string {
@@ -179,7 +189,7 @@ func syncExtractedFiles(srcDir, dstDir, selfExe string) error {
 				return err
 			}
 			fmt.Printf("[신규 추가] %s\n", filepath.Join(relDir, fileName))
-		} else if isTTDAsset {
+		} else if isTTDAsset || alwaysOverwrite[strings.ToLower(filepath.ToSlash(rel))] {
 			if err := copyFile(path, dstFilePath); err != nil {
 				return err
 			}
