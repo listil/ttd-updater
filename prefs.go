@@ -21,6 +21,7 @@ type Prefs struct {
 	GameSteamAppID        string `json:"game_steam_app_id"`
 	GameClientExePath     string `json:"game_client_exe_path"`
 	CreateDesktopShortcut bool   `json:"create_desktop_shortcut"`
+	Theme                 string `json:"theme"` // "light", "dark", 없으면 시스템 설정 따름
 }
 
 // loadPrefs는 설정을 불러온다. 파일이 없으면(최초 실행) 체크박스가 모두 unchecked인

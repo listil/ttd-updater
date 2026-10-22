@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"io"
 	"regexp"
 	"strings"
@@ -12,21 +11,27 @@ import (
 )
 
 // TTD 공식 사이트에 올라가 있는 업데이트 노트(설치 폴더의 TTD_ver_note.txt와 같은 내용).
-// zip을 받기 전에 "이번에 뭐가 바뀌는지"를 보여주려고 사이트 쪽을 읽는다 — zip 안의 사본은
-// 다운로드와 압축 해제가 끝나야 읽을 수 있기 때문.
+// zip 안의 사본은 다운로드·압축 해제가 끝나야 읽을 수 있으므로, 창이 뜨자마자 업데이트
+// 내역 패널을 채우려고 사이트 쪽을 읽는다.
 const releaseNotesURL = "https://ttdiablo.com/TTD_ver_note.txt"
 
-// 노트가 아무리 길어도 로그 창을 뒤덮지 않도록 보여줄 섹션 수를 제한한다(버전 정보가 없는
-// 새 설치(0.0.0)이면 전체 이력이 다 "새 버전"이 되므로 특히 필요).
-const maxNoteSections = 3
+// 패널에 보여줄 최대 섹션 수(최신순). 전체 이력은 수십 개라 런처 패널엔 최근 것만 충분하다.
+const maxNoteSections = 6
 
 // 각 버전 섹션의 시작 줄: " ▶ TTD v3.4.5 - 2026.10.22"
-var noteSectionRe = regexp.MustCompile(`^\s*▶\s*TTD\s*v?(\d+\.\d+\.\d+)`)
+var noteSectionRe = regexp.MustCompile(`^\s*▶\s*TTD\s*v?(\d+\.\d+\.\d+)\s*(?:-\s*(.*))?$`)
 
-// fetchReleaseNotes는 사이트에서 노트를 받아 localVer보다 새로운 버전 섹션들만 줄 단위로
-// 돌려준다(최신순, 최대 maxNoteSections개). 부가 기능이라 네트워크 오류, UTF-8이 아닌 응답,
-// 새 섹션 없음(노트가 zip보다 늦게 갱신된 경우 등)은 모두 오류 없이 nil로 처리한다.
-func fetchReleaseNotes(localVer string) []string {
+// NoteSection은 업데이트 노트의 버전 하나 분량이다. Lines는 원문 줄 그대로(앞 공백 1칸만
+// 정리) 보내고, "*"(소제목)/"-"(항목) 같은 표시는 프론트엔드가 해석해 꾸민다.
+type NoteSection struct {
+	Version string   `json:"version"`
+	Date    string   `json:"date"`
+	Lines   []string `json:"lines"`
+}
+
+// fetchReleaseNotes는 사이트에서 노트를 받아 최신 섹션들을 돌려준다. 부가 기능이라 네트워크
+// 오류나 UTF-8이 아닌 응답 등은 모두 오류 없이 nil로 처리한다(패널은 "불러오지 못함"만 표시).
+func fetchReleaseNotes() []NoteSection {
 	resp, err := doGet(newHTTPClient(10*time.Second), releaseNotesURL)
 	if err != nil {
 		return nil
@@ -39,47 +44,39 @@ func fetchReleaseNotes(localVer string) []string {
 	if err != nil || !utf8.Valid(data) {
 		return nil
 	}
-	return newerNoteSections(data, localVer, maxNoteSections)
+	return parseNoteSections(data, maxNoteSections)
 }
 
-// newerNoteSections는 노트 본문에서 localVer보다 새로운 섹션들의 줄을 뽑는다. 섹션은 최신순으로
-// 적혀 있다고 가정하지 않고 섹션마다 버전을 비교한다.
-func newerNoteSections(data []byte, localVer string, max int) []string {
-	var out []string
-	sections := 0
-	inNewer := false
+func parseNoteSections(data []byte, max int) []NoteSection {
+	var out []NoteSection
+	var cur *NoteSection
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), " \t\r")
 		if m := noteSectionRe.FindStringSubmatch(line); m != nil {
-			inNewer = isNewerVersion(m[1], localVer) && sections < max
-			if inNewer {
-				sections++
-				out = trimTrailingBlank(out)
-				if len(out) > 0 {
-					out = append(out, "") // 섹션 사이 빈 줄은 정확히 하나
-				}
+			if len(out) == max {
+				break
 			}
+			out = append(out, NoteSection{Version: m[1], Date: strings.TrimSpace(m[2])})
+			cur = &out[len(out)-1]
+			continue
 		}
-		// 연속된 빈 줄은 하나로 합친다
-		if inNewer && (line != "" || len(out) > 0 && out[len(out)-1] != "") {
-			out = append(out, line)
+		if cur == nil {
+			continue // 첫 섹션 이전의 "☆ 수정날짜" 같은 머리말은 건너뜀
 		}
+		line = strings.TrimPrefix(line, " ")
+		// 연속된 빈 줄은 하나로, 섹션 맨 앞의 빈 줄은 버림
+		if line == "" && (len(cur.Lines) == 0 || cur.Lines[len(cur.Lines)-1] == "") {
+			continue
+		}
+		cur.Lines = append(cur.Lines, line)
 	}
-	out = trimTrailingBlank(out)
-	if len(out) == 0 {
-		return nil
+	for i := range out {
+		l := out[i].Lines
+		for len(l) > 0 && l[len(l)-1] == "" {
+			l = l[:len(l)-1]
+		}
+		out[i].Lines = l
 	}
-	header := "=== 업데이트 내용 ==="
-	if localVer != "0.0.0" {
-		header = fmt.Sprintf("=== 업데이트 내용 (현재 v%s 이후) ===", localVer)
-	}
-	return append([]string{header}, out...)
-}
-
-func trimTrailingBlank(lines []string) []string {
-	for len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return lines
+	return out
 }

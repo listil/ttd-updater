@@ -127,6 +127,7 @@ type PrefsPayload struct {
 	GameSteamAppID        string `json:"gameSteamAppID"`
 	GameClientExePath     string `json:"gameClientExePath"`
 	CreateDesktopShortcut bool   `json:"createDesktopShortcut"`
+	Theme                 string `json:"theme"`
 }
 
 func (a *App) prefsPayload() PrefsPayload {
@@ -138,6 +139,7 @@ func (a *App) prefsPayload() PrefsPayload {
 		GameSteamAppID:        a.prefs.GameSteamAppID,
 		GameClientExePath:     a.prefs.GameClientExePath,
 		CreateDesktopShortcut: a.prefs.CreateDesktopShortcut,
+		Theme:                 a.prefs.Theme,
 	}
 }
 
@@ -162,6 +164,18 @@ func (a *App) finish(message string, alreadyLatest bool) {
 		SelfUpdateVersion:   a.selfUpdateVersion,
 		PrefsPayload:        a.prefsPayload(),
 	})
+}
+
+// NotesPayload는 업데이트 내역 패널 데이터다. Sections가 nil이면 불러오기 실패.
+// LocalVersion은 업데이트 전 버전으로, 프론트엔드가 이보다 새로운 섹션에 NEW 표시를 붙인다.
+type NotesPayload struct {
+	LocalVersion string        `json:"localVersion"`
+	Sections     []NoteSection `json:"sections"`
+}
+
+// emitVersions는 헤더의 "현재 → 최신" 버전 표시를 갱신한다(remote는 모르면 "").
+func (a *App) emitVersions(local, remote string) {
+	runtime.EventsEmit(a.ctx, "versions", map[string]string{"local": local, "remote": remote})
 }
 
 type zipCandidate struct {
@@ -209,10 +223,18 @@ func (a *App) run() {
 	a.status("=== 구글 드라이브 업데이트 확인 중 ===")
 	localVer := getLocalVersion()
 	a.status(fmt.Sprintf("현재 로컬 버전: %s", localVer))
+	a.emitVersions(localVer, "")
+
+	// 업데이트 내역 패널은 업데이트 확인/다운로드와 무관하게 병렬로 채운다 — 이미 최신이어도
+	// 최근 내역을 보여주고, 업데이트가 있으면 다운로드가 도는 동안 읽을 수 있게.
+	go func() {
+		runtime.EventsEmit(a.ctx, "notes", NotesPayload{LocalVersion: localVer, Sections: fetchReleaseNotes()})
+	}()
 
 	// 1. 파일 다운로드 없이 서버의 최신 버전 미리 검사
 	remoteZipName, remoteVer := getRemoteZipInfoWithoutDownload(folderURL)
 	if remoteVer != "" {
+		a.emitVersions(localVer, remoteVer)
 		a.status(fmt.Sprintf("드라이브 최신 파일 감지: %s (버전: %s)", remoteZipName, remoteVer))
 		if !isNewerVersion(remoteVer, localVer) {
 			a.status(">> 이미 최신 버전을 사용 중입니다.")
@@ -254,6 +276,9 @@ func (a *App) run() {
 		return
 	}
 	target := pickHighestVersion(zipEntries)
+	if remoteVer == "" {
+		a.emitVersions(localVer, target.ver)
+	}
 
 	// 사전 검사를 안 거쳤던 경우 여기서 최종 체크
 	if remoteVer == "" && !isNewerVersion(target.ver, localVer) {
@@ -268,14 +293,6 @@ func (a *App) run() {
 		a.status(fmt.Sprintf("[중단] %s", reason))
 		a.finish(reason, false)
 		return
-	}
-
-	// 다운로드가 진행되는 동안 읽을 수 있도록, 받기 전에 이번에 바뀌는 내용을 먼저 보여준다.
-	if notes := fetchReleaseNotes(localVer); notes != nil {
-		for _, line := range notes {
-			fmt.Println(line)
-		}
-		runtime.EventsEmit(a.ctx, "notes", notes)
 	}
 
 	a.status(fmt.Sprintf("파일 다운로드 중... (%s)", target.name))
@@ -405,4 +422,11 @@ func (a *App) Confirm(launchOnClose, launchTTDNow, launchGameNow, createShortcut
 	}
 
 	runtime.Quit(a.ctx)
+}
+
+// SetTheme은 화면 테마 선택("light"/"dark", ""=시스템 설정)을 바로 저장한다 — 다른 옵션처럼
+// "완료" 때 모아 저장하지 않는 건, 테마는 누르는 즉시 화면에 반영되는 설정이라서다.
+func (a *App) SetTheme(theme string) {
+	a.prefs.Theme = theme
+	_ = savePrefs(a.prefs)
 }

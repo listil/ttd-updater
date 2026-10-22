@@ -23,30 +23,106 @@ const selfUpdateSection = document.getElementById("selfUpdateSection");
 const installSelfUpdate = document.getElementById("installSelfUpdate");
 const selfUpdateLabel = document.getElementById("selfUpdateLabel");
 
+const notesEl = document.getElementById("notes");
+const notesBadge = document.getElementById("notesBadge");
+const localVerEl = document.getElementById("localVer");
+const remoteVerEl = document.getElementById("remoteVer");
+const progressBar = document.getElementById("progressBar");
+const logDetails = document.getElementById("logDetails");
+
 let savedMethod = null;
 let autoCloseTimer = null;
 let autoCloseRemaining = 0;
+let remoteVersion = "";
 
-// main.go의 초기 Width/Height와 맞춘 기본 창 크기. 실행 방식 설정 패널처럼 내용이 늘어나면
-// 창 안에서 스크롤바가 생기는 대신 창 자체를 실제 내용 높이에 맞춰 키운다/줄인다.
-const BASE_WINDOW_WIDTH = 440;
-const BASE_WINDOW_HEIGHT = 480;
+// "1.2.3" 형식끼리 비교: a가 b보다 크면 양수.
+function compareVersions(a, b) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  }
+  return 0;
+}
 
-const appEl = document.querySelector(".app");
+// 노트 원문의 줄 머리표("*" 소제목, "-" 항목)를 해석해 섹션 본문을 만든다.
+function renderNoteLine(text) {
+  const el = document.createElement("div");
+  const trimmed = text.trim();
+  if (trimmed === "") {
+    el.className = "note-gap";
+  } else if (trimmed.startsWith("*")) {
+    el.className = "note-sub";
+    el.textContent = trimmed.replace(/^\*\s*/, "");
+  } else if (trimmed.startsWith("-")) {
+    el.className = "note-item";
+    el.textContent = trimmed.replace(/^-\s*/, "");
+  } else {
+    el.className = "note-text";
+    el.textContent = trimmed;
+  }
+  return el;
+}
 
-function resizeWindowToContent() {
-  requestAnimationFrame(() => {
-    // .app은 CSS에서 height:100vh로 고정돼 있어서(내부는 flex로 넘치는 부분을 로그
-    // 스크롤로 흡수) scrollHeight를 그대로 재면 항상 현재 창 높이가 나온다. 실제
-    // 필요한 높이를 재려면 잠깐 고정을 풀고 자연스러운 높이로 펼쳐본 뒤 되돌린다.
-    const prevHeight = appEl.style.height;
-    appEl.style.height = "auto";
-    const needed = appEl.scrollHeight;
-    appEl.style.height = prevHeight;
+function renderNotes(payload) {
+  notesEl.replaceChildren();
+  const sections = payload.sections || [];
+  if (sections.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "notes-empty";
+    empty.textContent = "업데이트 내역을 불러오지 못했습니다.";
+    notesEl.appendChild(empty);
+    return;
+  }
 
-    const height = Math.max(BASE_WINDOW_HEIGHT, needed + 4);
-    window.runtime.WindowSetSize(BASE_WINDOW_WIDTH, height);
-  });
+  // 버전 정보가 없는 새 설치(0.0.0)는 전부 "새 버전"이 되므로 NEW 표시를 하지 않는다.
+  const local = payload.localVersion;
+  const markNew = local && local !== "0.0.0";
+  let newCount = 0;
+
+  for (const s of sections) {
+    const isNew = markNew && compareVersions(s.version, local) > 0;
+    if (isNew) newCount++;
+
+    const card = document.createElement("article");
+    card.className = "note" + (isNew ? " is-new" : "");
+
+    const head = document.createElement("div");
+    head.className = "note-head";
+    const ver = document.createElement("span");
+    ver.className = "note-ver";
+    ver.textContent = "v" + s.version;
+    head.appendChild(ver);
+    if (isNew) {
+      const badge = document.createElement("span");
+      badge.className = "note-new";
+      badge.textContent = "NEW";
+      head.appendChild(badge);
+    }
+    const date = document.createElement("span");
+    date.className = "note-date";
+    date.textContent = s.date || "";
+    head.appendChild(date);
+
+    const body = document.createElement("div");
+    body.className = "note-body";
+    for (const line of s.lines || []) body.appendChild(renderNoteLine(line));
+
+    card.append(head, body);
+    notesEl.appendChild(card);
+  }
+
+  notesBadge.hidden = newCount === 0;
+  notesBadge.textContent = `새 버전 ${newCount}개`;
+}
+
+// 실행 버튼 문구: 실제로 무언가 실행될 때만 "실행"이라고 쓴다.
+function refreshLaunchLabel() {
+  const targets = [];
+  if (launchTTD.checked) targets.push("TTD");
+  if (launchGame.checked) targets.push("토치라이트");
+  confirmBtn.textContent =
+    launchOnClose.checked && targets.length > 0 ? `▶  ${targets.join(" + ")} 실행` : "닫기";
 }
 
 // "이미 최신 버전"일 때만 몇 초 후 자동으로 완료 처리한다. 체크박스를 만지거나 버튼에
@@ -94,6 +170,9 @@ function refreshLaunchTargetsEnabled() {
   launchTargets.classList.toggle("disabled", !launchOnClose.checked);
 }
 launchOnClose.addEventListener("change", refreshLaunchTargetsEnabled);
+launchOnClose.addEventListener("change", refreshLaunchLabel);
+launchTTD.addEventListener("change", refreshLaunchLabel);
+launchGame.addEventListener("change", refreshLaunchLabel);
 
 function refreshMethodSummary() {
   if (savedMethod === "steam") {
@@ -123,12 +202,14 @@ window.runtime.EventsOn("status", (text) => {
   headerText.textContent = text.replace(/^>>\s*/, "").replace(/^\[.*?\]\s*/, "");
 });
 
-// 다운로드 직전에 한 번 오는 업데이트 노트(새 버전 섹션들). 진행 상황 줄과 구분되게 따로
-// 스타일을 주고, 상단 상태 텍스트는 건드리지 않는다.
-window.runtime.EventsOn("notes", (lines) => {
-  for (const text of lines) {
-    const isHead = text.startsWith("===") || /^\s*▶/.test(text);
-    appendLine(text, isHead ? "note note-head" : "note");
+// 업데이트 확인과 병렬로 받아온 업데이트 내역(최신 섹션들) — 왼쪽 패널에 그린다.
+window.runtime.EventsOn("notes", renderNotes);
+
+window.runtime.EventsOn("versions", (v) => {
+  localVerEl.textContent = v.local && v.local !== "0.0.0" ? "v" + v.local : "없음";
+  if (v.remote) {
+    remoteVersion = v.remote;
+    remoteVerEl.textContent = "v" + v.remote;
   }
 });
 
@@ -136,6 +217,7 @@ window.runtime.EventsOn("notes", (lines) => {
 // 둘 다 같은 모양의 체크박스 상태를 담고 있어서 반영 로직을 공유한다 — 옵션 자체는 진행 상황과
 // 무관하게 항상 저장된 값을 그대로 보여주면 되기 때문이다.
 function applyPrefsPayload(payload) {
+  applyTheme(payload.theme || "");
   launchOnClose.checked = payload.launchOnClose;
   launchTTD.checked = payload.launchTTD;
   launchGame.checked = payload.launchGame;
@@ -148,19 +230,26 @@ function applyPrefsPayload(payload) {
   steamAppId.value = payload.gameSteamAppID || DEFAULT_STEAM_APP_ID;
   clientExePath.value = payload.gameClientExePath || "";
   refreshMethodSummary();
+  refreshLaunchLabel();
 }
 
-// 창이 뜨자마자(업데이트 확인이 끝나길 기다리지 않고) 옵션들을 미리 보여준다. "완료" 버튼은
+// 창이 뜨자마자(업데이트 확인이 끝나길 기다리지 않고) 옵션들을 미리 보여준다. 실행 버튼은
 // 아직 비활성 상태 — 실제로 닫아도 되는 시점(ready)이 되면 활성화된다.
-window.runtime.EventsOn("init", (payload) => {
-  applyPrefsPayload(payload);
-  resizeWindowToContent();
-});
+window.runtime.EventsOn("init", applyPrefsPayload);
 
 window.runtime.EventsOn("ready", (payload) => {
-  const isError = payload.message.includes("오류");
+  // "오류" 외에 설치 폴더 안전장치로 중단된 경우("[중단]" 사유 메시지)도 실패로 표시한다.
+  const isError = payload.message.includes("오류") || payload.message.includes("폴더");
   statusDot.className = "dot " + (isError ? "error" : "done");
+  progressBar.className = "progress-bar" + (isError ? " error" : "");
   headerText.textContent = payload.message;
+  headerText.title = payload.message;
+  if (isError) logDetails.open = true;
+
+  // 업데이트가 실제로 적용됐다면 이제 현재 버전 = 최신 버전
+  if (!isError && !payload.alreadyLatest && remoteVersion) {
+    localVerEl.textContent = "v" + remoteVersion;
+  }
 
   applyPrefsPayload(payload);
   confirmBtn.disabled = false;
@@ -174,7 +263,6 @@ window.runtime.EventsOn("ready", (payload) => {
     installSelfUpdate.checked = false;
   }
 
-  resizeWindowToContent();
 
   if (payload.alreadyLatest) {
     startAutoClose(5);
@@ -183,7 +271,6 @@ window.runtime.EventsOn("ready", (payload) => {
 
 gameSetupBtn.addEventListener("click", async () => {
   gameSetupPanel.hidden = !gameSetupPanel.hidden;
-  resizeWindowToContent();
 
   // 아직 경로를 고른 적 없으면, 통상적인 설치 경로에 실제로 파일이 있는지 확인해서
   // 있을 때만 "찾아보기 전 제안값"으로 미리 채워준다(없으면 빈 값 그대로 둠).
@@ -216,14 +303,12 @@ gameSetupSave.addEventListener("click", async () => {
   savedMethod = method;
   refreshMethodSummary();
   gameSetupPanel.hidden = true;
-  resizeWindowToContent();
 });
 
 confirmBtn.addEventListener("click", async () => {
   cancelAutoClose();
   if (launchOnClose.checked && launchGame.checked && !savedMethod) {
     gameSetupPanel.hidden = false;
-    resizeWindowToContent();
     alert("먼저 토치라이트 실행 방식을 설정해 주세요.");
     return;
   }
@@ -235,3 +320,35 @@ confirmBtn.addEventListener("click", async () => {
     installSelfUpdate.checked
   );
 });
+
+// 테마: ""=시스템 설정, "light"/"dark"=고정. 저장은 백엔드 prefs(updater_prefs.json)가 하고,
+// localStorage 사본은 다음 실행 때 "init" 이벤트가 오기 전 잠깐 반대 테마가 번쩍이는 것만 막는다.
+const themeButtons = document.querySelectorAll("#themeSwitch button");
+
+function applyTheme(theme) {
+  if (theme) document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+  themeButtons.forEach((b) => b.classList.toggle("active", b.dataset.themeValue === (theme || "")));
+  try {
+    localStorage.setItem("theme", theme || "");
+  } catch (e) {}
+}
+
+try {
+  applyTheme(localStorage.getItem("theme") || "");
+} catch (e) {
+  applyTheme("");
+}
+
+themeButtons.forEach((b) =>
+  b.addEventListener("click", () => {
+    applyTheme(b.dataset.themeValue);
+    window.go.main.App.SetTheme(b.dataset.themeValue);
+  })
+);
+
+// 바로가기: WebView 안에서 페이지를 여는 대신 사용자의 기본 브라우저로 연다.
+// (드라이브 주소는 app.go의 folderURL과 같은 폴더)
+document.querySelectorAll(".link-chip").forEach((b) =>
+  b.addEventListener("click", () => window.runtime.BrowserOpenURL(b.dataset.url))
+);
