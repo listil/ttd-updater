@@ -25,3 +25,7 @@ export function SaveGameSetup(arg1, arg2, arg3) {
 export function SetTheme(arg1) {
   return window['go']['main']['App']['SetTheme'](arg1);
 }
+
+export function StartUpdate() {
+  return window['go']['main']['App']['StartUpdate']();
+}

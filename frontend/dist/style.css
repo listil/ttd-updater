@@ -641,3 +641,19 @@ button.link-btn {
 .hero-link:hover {
   border-color: rgba(47, 184, 240, 0.6);
 }
+
+/* ── 업데이트 대기 상태(확인 끝, 사용자 확정 전) ── */
+.update-row span {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.dot.pending {
+  background: var(--accent);
+  animation: none;
+}
+
+.progress-bar.pending {
+  background: var(--accent);
+  opacity: 0.35;
+}

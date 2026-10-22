@@ -44,6 +44,10 @@ type App struct {
 
 	domReadyOnce sync.Once
 
+	// 확인은 끝났고 사용자의 "업데이트" 클릭(StartUpdate)을 기다리는 업데이트. nil이면 없음.
+	updateMu sync.Mutex
+	pending  *pendingUpdate
+
 	// ttd_updater 자기 자신의 GitHub Releases 최신 버전 확인 결과. run() 시작 부분에서 한 번
 	// 채워지고, downloadURL이 비어있지 않으면 새 버전이 있다는 뜻이다.
 	selfUpdateVersion     string
@@ -166,6 +170,8 @@ type ReadyPayload struct {
 	Message             string `json:"message"`
 	AlreadyLatest       bool   `json:"alreadyLatest"`
 	Error               bool   `json:"error"`
+	UpdateAvailable     bool   `json:"updateAvailable"` // 새 버전 확인됨, 사용자 확정 대기 중
+	UpdateVersion       string `json:"updateVersion"`
 	SelfUpdateAvailable bool   `json:"selfUpdateAvailable"`
 	SelfUpdateVersion   string `json:"selfUpdateVersion"`
 	PrefsPayload
@@ -176,14 +182,24 @@ type ReadyPayload struct {
 // (실제 업데이트가 있었거나 오류가 났을 때는 사용자가 결과를 확인할 시간이 필요하므로 자동 종료 안 함).
 // isError는 화면의 성공/실패 표시용 — 메시지 문구로 추측하지 않도록 호출하는 쪽이 명시한다.
 func (a *App) finish(message string, alreadyLatest, isError bool) {
-	runtime.EventsEmit(a.ctx, "ready", ReadyPayload{
-		Message:             message,
-		AlreadyLatest:       alreadyLatest,
-		Error:               isError,
-		SelfUpdateAvailable: a.selfUpdateDownloadURL != "",
-		SelfUpdateVersion:   a.selfUpdateVersion,
-		PrefsPayload:        a.prefsPayload(),
+	a.emitReady(ReadyPayload{Message: message, AlreadyLatest: alreadyLatest, Error: isError})
+}
+
+// finishWithUpdate는 "새 버전이 있지만 아직 받지 않음" 상태로 화면을 넘긴다 — 프론트엔드는
+// 설치 체크박스와 "업데이트" 버튼을 보여주고, 사용자가 누르면 StartUpdate를 호출한다.
+func (a *App) finishWithUpdate(version string) {
+	a.emitReady(ReadyPayload{
+		Message:         fmt.Sprintf("새 버전 v%s을 설치할 수 있습니다.", version),
+		UpdateAvailable: true,
+		UpdateVersion:   version,
 	})
+}
+
+func (a *App) emitReady(p ReadyPayload) {
+	p.SelfUpdateAvailable = a.selfUpdateDownloadURL != ""
+	p.SelfUpdateVersion = a.selfUpdateVersion
+	p.PrefsPayload = a.prefsPayload()
+	runtime.EventsEmit(a.ctx, "ready", p)
 }
 
 // NotesPayload는 업데이트 내역 패널 데이터다. Sections가 nil이면 불러오기 실패.
@@ -215,8 +231,8 @@ func pickHighestVersion(cands []zipCandidate) zipCandidate {
 	return cands[0]
 }
 
-// run은 버전 확인 -> (필요 시) 다운로드/적용까지의 업데이트 흐름 전체를 수행하고,
-// 어느 경로로 끝나든 마지막에 a.finish()를 호출해 프론트엔드를 체크박스 화면으로 전환시킨다.
+// run은 업데이트 "확인"까지만 수행한다. 새 버전이 있으면 받지 않고 finishWithUpdate로 사용자
+// 확정을 기다리며(실제 다운로드/적용은 StartUpdate → applyUpdate), 그 외에는 a.finish()로 끝낸다.
 func (a *App) run() {
 	cleanupStaleTempDirs()
 
@@ -269,20 +285,12 @@ func (a *App) run() {
 			a.finish("이미 최신 버전을 사용 중입니다.", true, false)
 			return
 		}
-		a.status(fmt.Sprintf(">> 새 버전(%s)이 발견되어 다운로드를 시작합니다!", remoteVer))
+		a.status(fmt.Sprintf(">> 새 버전(%s)이 있습니다.", remoteVer))
 	}
 
 	client := newHTTPClient(60 * time.Second)
 
-	tempDir, err := os.MkdirTemp("", "gdrive_update_")
-	if err != nil {
-		a.status(fmt.Sprintf("[오류 발생] %v", err))
-		a.finish("업데이트 확인 중 오류가 발생했습니다.", false, true)
-		return
-	}
-	defer os.RemoveAll(tempDir)
-
-	// 2. 폴더 목록에서 최신 ZIP 하나만 찾아 그 파일만 다운로드 (전체 폴더 다운로드 불필요)
+	// 2. 폴더 목록에서 최신 ZIP 하나만 찾아 그 파일만 받는다 (전체 폴더 다운로드 불필요)
 	folderID := extractFolderID(folderURL)
 	entries, err := listDriveFolder(folderID, client)
 	if err != nil {
@@ -316,13 +324,57 @@ func (a *App) run() {
 		return
 	}
 
-	// 실제로 파일을 받아 적용하기 전, targetDir가 TTD 설치 폴더가 맞는지(또는 비어 있는지)
-	// 확인한다 — 엉뚱한 폴더(소스 폴더, 다운로드 폴더 등)에서 실행됐다면 여기서 중단.
+	// 업데이트를 제안하기 전에 targetDir가 TTD 설치 폴더가 맞는지(또는 비어 있는지) 확인한다 —
+	// 엉뚱한 폴더(소스 폴더, 다운로드 폴더 등)에서 실행됐다면 업데이트 버튼 자체를 내놓지 않는다.
 	if safe, reason := isSafeInstallDir(targetDir); !safe {
 		a.status(fmt.Sprintf("[중단] %s", reason))
 		a.finish(reason, false, true)
 		return
 	}
+
+	// 자동으로 받지 않는다 — 여기서 멈추고 사용자가 "업데이트"를 눌러(StartUpdate) 확정할 때까지
+	// 기다린다. 체크를 풀고 닫으면 이번엔 업데이트 없이 그대로 실행/종료한다.
+	saveVer := remoteVer
+	if saveVer == "" {
+		saveVer = target.ver
+	}
+	a.updateMu.Lock()
+	a.pending = &pendingUpdate{target: target, saveVer: saveVer}
+	a.updateMu.Unlock()
+	a.status(fmt.Sprintf(">> v%s 업데이트를 설치할 수 있습니다. 아래 \"업데이트\" 버튼을 눌러 주세요.", saveVer))
+	a.finishWithUpdate(saveVer)
+}
+
+// pendingUpdate는 확인은 끝났지만 아직 사용자가 설치를 확정하지 않은 업데이트다.
+type pendingUpdate struct {
+	target  zipCandidate
+	saveVer string // 적용 후 version_info.json에 기록할 버전
+}
+
+// StartUpdate는 "업데이트" 버튼에서 호출된다. 대기 중인 업데이트를 백그라운드에서 받아 적용하고,
+// 끝나면 평소처럼 "ready"를 보낸다. 중복 클릭이나 대기 중인 업데이트가 없을 때는 아무것도 안 한다.
+func (a *App) StartUpdate() {
+	a.updateMu.Lock()
+	p := a.pending
+	a.pending = nil
+	a.updateMu.Unlock()
+	if p != nil {
+		go a.applyUpdate(*p)
+	}
+}
+
+// applyUpdate는 대기 중이던 업데이트의 다운로드 → 압축 해제 → 파일 반영을 수행한다.
+func (a *App) applyUpdate(p pendingUpdate) {
+	target := p.target
+	client := newHTTPClient(60 * time.Second)
+
+	tempDir, err := os.MkdirTemp("", "gdrive_update_")
+	if err != nil {
+		a.status(fmt.Sprintf("[오류 발생] %v", err))
+		a.finish("업데이트 준비 중 오류가 발생했습니다.", false, true)
+		return
+	}
+	defer os.RemoveAll(tempDir)
 
 	a.status(fmt.Sprintf("파일 다운로드 중... (%s)", target.name))
 	zipPath := filepath.Join(tempDir, target.name)
@@ -347,12 +399,8 @@ func (a *App) run() {
 		return
 	}
 
-	saveVer := remoteVer
-	if saveVer == "" {
-		saveVer = target.ver
-	}
-	if saveVer != "0.0.0" {
-		_ = saveLocalVersion(saveVer)
+	if p.saveVer != "0.0.0" {
+		_ = saveLocalVersion(p.saveVer)
 	}
 
 	a.status("[성공] 업데이트가 완료되었습니다!")

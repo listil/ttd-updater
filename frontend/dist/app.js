@@ -108,8 +108,23 @@ function renderNotes(payload) {
   notesBadge.textContent = `새 버전 ${newVersions.size}개`;
 }
 
-// 실행 버튼 문구: 실제로 무언가 실행될 때만 "실행"이라고 쓴다.
+// 확인은 끝났고 사용자의 설치 확정을 기다리는 업데이트 버전("" = 없음). 이 동안 아래 버튼은
+// "설치 체크박스"가 켜져 있으면 "업데이트" 버튼이 되고, 누르면 그때 다운로드를 시작한다.
+let pendingUpdateVersion = "";
+const updateSection = document.getElementById("updateSection");
+const installUpdate = document.getElementById("installUpdate");
+const updateLabel = document.getElementById("updateLabel");
+
+function updateWillRun() {
+  return pendingUpdateVersion !== "" && installUpdate.checked;
+}
+
+// 실행 버튼 문구: 업데이트 대기 중이면 "업데이트", 아니면 실제로 무언가 실행될 때만 "실행".
 function refreshLaunchLabel() {
+  if (updateWillRun()) {
+    confirmBtn.textContent = `⬇  TTD v${pendingUpdateVersion} 업데이트`;
+    return;
+  }
   const targets = [];
   if (launchTTD.checked) targets.push("TTD");
   if (launchGame.checked) targets.push("토치라이트");
@@ -238,18 +253,28 @@ window.runtime.EventsOn("init", applyPrefsPayload);
 
 window.runtime.EventsOn("ready", (payload) => {
   const isError = payload.error;
-  statusDot.className = "dot " + (isError ? "error" : "done");
-  progressBar.className = "progress-bar" + (isError ? " error" : "");
+  const state = isError ? "error" : payload.updateAvailable ? "pending" : "done";
+  statusDot.className = "dot " + state;
+  progressBar.className = "progress-bar" + (state === "done" ? "" : " " + state);
   headerText.textContent = payload.message;
   headerText.title = payload.message;
   if (isError) logDetails.open = true;
 
   // 업데이트가 실제로 적용됐다면 이제 현재 버전 = 최신 버전
-  if (!isError && !payload.alreadyLatest && remoteVersion) {
+  if (state === "done" && !payload.alreadyLatest && remoteVersion) {
     localVerEl.textContent = "v" + remoteVersion;
   }
 
+  // "ready"는 업데이트 대기(updateAvailable) → 업데이트 완료 순서로 두 번 올 수 있다.
+  pendingUpdateVersion = payload.updateAvailable ? payload.updateVersion : "";
+  updateSection.hidden = !payload.updateAvailable;
+  if (payload.updateAvailable) {
+    installUpdate.checked = true;
+    updateLabel.textContent = `TTD v${payload.updateVersion} 업데이트 설치`;
+  }
+
   applyPrefsPayload(payload);
+  refreshLaunchLabel();
   confirmBtn.disabled = false;
   waitingHint.hidden = true;
 
@@ -302,8 +327,26 @@ gameSetupSave.addEventListener("click", async () => {
   gameSetupPanel.hidden = true;
 });
 
+installUpdate.addEventListener("change", refreshLaunchLabel);
+
 confirmBtn.addEventListener("click", async () => {
   cancelAutoClose();
+
+  // 업데이트 대기 중 + 설치 체크 → 창을 닫지 않고 지금 다운로드/적용을 시작한다. 끝나면 백엔드가
+  // 다시 "ready"를 보내 이 버튼이 평소의 실행/닫기 버튼으로 돌아온다.
+  if (updateWillRun()) {
+    const version = pendingUpdateVersion;
+    pendingUpdateVersion = "";
+    updateSection.hidden = true;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = `v${version} 업데이트 중...`;
+    statusDot.className = "dot";
+    progressBar.className = "progress-bar working";
+    headerText.textContent = "업데이트를 내려받는 중...";
+    await window.go.main.App.StartUpdate();
+    return;
+  }
+
   if (launchOnClose.checked && launchGame.checked && !savedMethod) {
     gameSetupPanel.hidden = false;
     alert("먼저 토치라이트 실행 방식을 설정해 주세요.");
