@@ -34,16 +34,9 @@ let savedMethod = null;
 let autoCloseTimer = null;
 let autoCloseRemaining = 0;
 let remoteVersion = "";
-
-// "1.2.3" 형식끼리 비교: a가 b보다 크면 양수.
-function compareVersions(a, b) {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
-  }
-  return 0;
-}
+// "init"으로 저장된 설정을 이미 화면에 반영했는지. 반영한 뒤로는 체크박스가 사용자 것이므로
+// "ready"가 다시 덮어쓰지 않는다(다운로드 중에 바꾼 선택이 되돌아가지 않게).
+let prefsApplied = false;
 
 // 노트 원문의 줄 머리표("*" 소제목, "-" 항목)를 해석해 섹션 본문을 만든다.
 function renderNoteLine(text) {
@@ -75,14 +68,13 @@ function renderNotes(payload) {
     return;
   }
 
-  // 버전 정보가 없는 새 설치(0.0.0)는 전부 "새 버전"이 되므로 NEW 표시를 하지 않는다.
-  const local = payload.localVersion;
-  const markNew = local && local !== "0.0.0";
-  let newCount = 0;
+  // NEW 여부는 백엔드(markNewSections)가 계산한다. 같은 버전이 노트에 두 번 적혀 있을 수
+  // 있으므로(예: v3.4.5 두 섹션) 개수는 섹션이 아니라 버전 기준으로 센다.
+  const newVersions = new Set();
 
   for (const s of sections) {
-    const isNew = markNew && compareVersions(s.version, local) > 0;
-    if (isNew) newCount++;
+    const isNew = s.isNew;
+    if (isNew) newVersions.add(s.version);
 
     const card = document.createElement("article");
     card.className = "note" + (isNew ? " is-new" : "");
@@ -112,8 +104,8 @@ function renderNotes(payload) {
     notesEl.appendChild(card);
   }
 
-  notesBadge.hidden = newCount === 0;
-  notesBadge.textContent = `새 버전 ${newCount}개`;
+  notesBadge.hidden = newVersions.size === 0;
+  notesBadge.textContent = `새 버전 ${newVersions.size}개`;
 }
 
 // 실행 버튼 문구: 실제로 무언가 실행될 때만 "실행"이라고 쓴다.
@@ -163,6 +155,11 @@ createShortcut.addEventListener("change", cancelAutoClose);
 installSelfUpdate.addEventListener("change", cancelAutoClose);
 confirmBtn.addEventListener("mouseenter", cancelAutoClose);
 gameSetupBtn.addEventListener("mouseenter", cancelAutoClose);
+// 업데이트 내역을 읽는 중(스크롤/클릭/키 입력)에도 창이 닫히지 않게 한다.
+for (const type of ["pointerdown", "wheel", "keydown"]) {
+  document.addEventListener(type, cancelAutoClose, { passive: true });
+}
+notesEl.addEventListener("scroll", cancelAutoClose, { passive: true });
 
 // launchOnClose는 "종료 시 실제로 실행할지"이고 launchTTD/launchGame은 "그중 무엇을
 // 대상으로 할지"이므로, 전자가 꺼져 있으면 대상 선택 UI를 비활성화해 혼동을 막는다.
@@ -214,9 +211,11 @@ window.runtime.EventsOn("versions", (v) => {
 });
 
 // "init"(업데이트 확인이 시작되기도 전, 창이 뜨자마자)과 "ready"(업데이트 확인/적용이 끝난 뒤)
-// 둘 다 같은 모양의 체크박스 상태를 담고 있어서 반영 로직을 공유한다 — 옵션 자체는 진행 상황과
-// 무관하게 항상 저장된 값을 그대로 보여주면 되기 때문이다.
+// 둘 다 같은 모양의 체크박스 상태를 담고 있어서 반영 로직을 공유한다. 단 실제로 반영하는 건
+// 처음 한 번뿐이다 — "ready"는 "init"이 (프론트엔드가 뜨기 전에 보내져) 유실된 경우의 대비책.
 function applyPrefsPayload(payload) {
+  if (prefsApplied) return;
+  prefsApplied = true;
   applyTheme(payload.theme || "");
   launchOnClose.checked = payload.launchOnClose;
   launchTTD.checked = payload.launchTTD;
@@ -238,8 +237,7 @@ function applyPrefsPayload(payload) {
 window.runtime.EventsOn("init", applyPrefsPayload);
 
 window.runtime.EventsOn("ready", (payload) => {
-  // "오류" 외에 설치 폴더 안전장치로 중단된 경우("[중단]" 사유 메시지)도 실패로 표시한다.
-  const isError = payload.message.includes("오류") || payload.message.includes("폴더");
+  const isError = payload.error;
   statusDot.className = "dot " + (isError ? "error" : "done");
   progressBar.className = "progress-bar" + (isError ? " error" : "");
   headerText.textContent = payload.message;
@@ -262,7 +260,6 @@ window.runtime.EventsOn("ready", (payload) => {
     selfUpdateSection.hidden = true;
     installSelfUpdate.checked = false;
   }
-
 
   if (payload.alreadyLatest) {
     startAutoClose(5);
@@ -347,8 +344,11 @@ themeButtons.forEach((b) =>
   })
 );
 
-// 바로가기: WebView 안에서 페이지를 여는 대신 사용자의 기본 브라우저로 연다.
-// (드라이브 주소는 app.go의 folderURL과 같은 폴더)
+// 바로가기: WebView 안에서 페이지를 여는 대신 사용자의 기본 브라우저로 연다. data-url이 없는
+// "TTD 다운로드"는 업데이트 소스와 어긋나지 않도록 백엔드의 folderURL을 그대로 받아 쓴다.
 document.querySelectorAll(".link-chip").forEach((b) =>
-  b.addEventListener("click", () => window.runtime.BrowserOpenURL(b.dataset.url))
+  b.addEventListener("click", async () => {
+    const url = b.dataset.url || (await window.go.main.App.FolderURL());
+    window.runtime.BrowserOpenURL(url);
+  })
 );

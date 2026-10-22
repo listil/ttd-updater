@@ -7,6 +7,8 @@ export function Confirm(arg1:boolean,arg2:boolean,arg3:boolean,arg4:boolean,arg5
 
 export function DefaultClientExePath():Promise<string>;
 
+export function FolderURL():Promise<string>;
+
 export function SaveGameSetup(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function SetTheme(arg1:string):Promise<void>;

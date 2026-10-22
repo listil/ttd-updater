@@ -21,12 +21,26 @@ const maxNoteSections = 6
 // 각 버전 섹션의 시작 줄: " ▶ TTD v3.4.5 - 2026.10.22"
 var noteSectionRe = regexp.MustCompile(`^\s*▶\s*TTD\s*v?(\d+\.\d+\.\d+)\s*(?:-\s*(.*))?$`)
 
-// NoteSection은 업데이트 노트의 버전 하나 분량이다. Lines는 원문 줄 그대로(앞 공백 1칸만
-// 정리) 보내고, "*"(소제목)/"-"(항목) 같은 표시는 프론트엔드가 해석해 꾸민다.
+// NoteSection은 업데이트 노트의 버전 하나 분량이다. Lines는 원문 줄 그대로(끝 공백만 정리)
+// 보내고, 앞 공백 정리와 "*"(소제목)/"-"(항목) 해석은 프론트엔드가 한다.
 type NoteSection struct {
 	Version string   `json:"version"`
 	Date    string   `json:"date"`
 	Lines   []string `json:"lines"`
+	IsNew   bool     `json:"isNew"` // 이번 업데이트로 받게 될 버전인지(markNewSections)
+}
+
+// markNewSections는 localVer보다 새롭고 remoteVer(드라이브 최신 zip)보다 새롭지 않은 섹션에
+// IsNew를 표시한다. 버전 정보가 없는 새 설치(0.0.0)는 전부 "새 버전"이 되어 의미가 없으므로
+// 표시하지 않고, remoteVer를 모르면("") 상한 없이 localVer만 기준으로 한다.
+func markNewSections(sections []NoteSection, localVer, remoteVer string) {
+	if localVer == "0.0.0" {
+		return
+	}
+	for i := range sections {
+		v := sections[i].Version
+		sections[i].IsNew = isNewerVersion(v, localVer) && (remoteVer == "" || !isNewerVersion(v, remoteVer))
+	}
 }
 
 // fetchReleaseNotes는 사이트에서 노트를 받아 최신 섹션들을 돌려준다. 부가 기능이라 네트워크
@@ -51,6 +65,8 @@ func parseNoteSections(data []byte, max int) []NoteSection {
 	var out []NoteSection
 	var cur *NoteSection
 	sc := bufio.NewScanner(bytes.NewReader(data))
+	// 기본 64KB 줄 제한이면 긴 줄 하나에서 조용히 멈추므로, 읽기 상한(1MB)과 맞춘다.
+	sc.Buffer(make([]byte, 0, 64*1024), len(data)+1)
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), " \t\r")
 		if m := noteSectionRe.FindStringSubmatch(line); m != nil {
@@ -64,7 +80,6 @@ func parseNoteSections(data []byte, max int) []NoteSection {
 		if cur == nil {
 			continue // 첫 섹션 이전의 "☆ 수정날짜" 같은 머리말은 건너뜀
 		}
-		line = strings.TrimPrefix(line, " ")
 		// 연속된 빈 줄은 하나로, 섹션 맨 앞의 빈 줄은 버림
 		if line == "" && (len(cur.Lines) == 0 || cur.Lines[len(cur.Lines)-1] == "") {
 			continue

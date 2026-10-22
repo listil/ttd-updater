@@ -148,7 +148,12 @@ func syncExtractedFiles(srcDir, dstDir, selfExe string) error {
 			targetRoot = filepath.Join(dstDir, relDir)
 		}
 
-		isTTDAsset := ttdAssetRe.MatchString(fileName)
+		// json/ 아래의 ttd_* 파일(ttd_resume_snapshot.json, ttd_log_state.json 등)은 TTD가 실행 중에
+		// 만드는 세션/복구 상태라, 이름이 TTD로 시작해도 "배포 자산 덮어쓰기" 대상에서 뺀다 — 혹시
+		// zip에 초기본이 들어가더라도 업데이트할 때마다 사용자의 진행 중 세션이 지워지지 않게.
+		// (pet/ttd_1.webp, sound/ttd1.wav 같은 다른 하위 폴더의 TTD 자산은 계속 덮어쓴다.)
+		isStateDir := strings.EqualFold(strings.SplitN(filepath.ToSlash(rel), "/", 2)[0], "json")
+		isTTDAsset := ttdAssetRe.MatchString(fileName) && !isStateDir
 		isAppExe := appExeRe.MatchString(fileName)
 
 		if isAppExe {

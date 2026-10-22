@@ -14,6 +14,10 @@ export function DefaultClientExePath() {
   return window['go']['main']['App']['DefaultClientExePath']();
 }
 
+export function FolderURL() {
+  return window['go']['main']['App']['FolderURL']();
+}
+
 export function SaveGameSetup(arg1, arg2, arg3) {
   return window['go']['main']['App']['SaveGameSetup'](arg1, arg2, arg3);
 }

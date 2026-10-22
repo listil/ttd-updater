@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -34,8 +35,12 @@ func init() {
 // startup에서 백그라운드로 업데이트를 진행하며 "status"/"ready" 이벤트로 진행 상황을 알리고,
 // 나머지 메서드는 완료 후 체크박스 화면에서 프론트엔드가 호출한다.
 type App struct {
-	ctx   context.Context
-	prefs Prefs
+	ctx context.Context
+
+	// prefs는 run() 고루틴(finish)과 프론트엔드 바인딩 호출(SetTheme/SaveGameSetup/Confirm)이
+	// 서로 다른 고루틴에서 동시에 읽고 쓰므로 prefsMu로 보호한다.
+	prefsMu sync.Mutex
+	prefs   Prefs
 
 	// ttd_updater 자기 자신의 GitHub Releases 최신 버전 확인 결과. run() 시작 부분에서 한 번
 	// 채워지고, downloadURL이 비어있지 않으면 새 버전이 있다는 뜻이다.
@@ -131,6 +136,8 @@ type PrefsPayload struct {
 }
 
 func (a *App) prefsPayload() PrefsPayload {
+	a.prefsMu.Lock()
+	defer a.prefsMu.Unlock()
 	return PrefsPayload{
 		LaunchOnClose:         a.prefs.LaunchOnClose,
 		LaunchTTD:             a.prefs.LaunchTTDAfterUpdate,
@@ -147,6 +154,7 @@ func (a *App) prefsPayload() PrefsPayload {
 type ReadyPayload struct {
 	Message             string `json:"message"`
 	AlreadyLatest       bool   `json:"alreadyLatest"`
+	Error               bool   `json:"error"`
 	SelfUpdateAvailable bool   `json:"selfUpdateAvailable"`
 	SelfUpdateVersion   string `json:"selfUpdateVersion"`
 	PrefsPayload
@@ -155,11 +163,12 @@ type ReadyPayload struct {
 // finish는 마지막에 한 번만 호출된다. alreadyLatest는 "이미 최신 버전이라 아무 것도 안 함"
 // 케이스만 true로 표시한다 — 프론트엔드가 이 경우에만 자동 종료 카운트다운을 시작한다
 // (실제 업데이트가 있었거나 오류가 났을 때는 사용자가 결과를 확인할 시간이 필요하므로 자동 종료 안 함).
-func (a *App) finish(message string, alreadyLatest bool) {
-	a.prefs = loadPrefs()
+// isError는 화면의 성공/실패 표시용 — 메시지 문구로 추측하지 않도록 호출하는 쪽이 명시한다.
+func (a *App) finish(message string, alreadyLatest, isError bool) {
 	runtime.EventsEmit(a.ctx, "ready", ReadyPayload{
 		Message:             message,
 		AlreadyLatest:       alreadyLatest,
+		Error:               isError,
 		SelfUpdateAvailable: a.selfUpdateDownloadURL != "",
 		SelfUpdateVersion:   a.selfUpdateVersion,
 		PrefsPayload:        a.prefsPayload(),
@@ -167,10 +176,9 @@ func (a *App) finish(message string, alreadyLatest bool) {
 }
 
 // NotesPayload는 업데이트 내역 패널 데이터다. Sections가 nil이면 불러오기 실패.
-// LocalVersion은 업데이트 전 버전으로, 프론트엔드가 이보다 새로운 섹션에 NEW 표시를 붙인다.
+// 각 섹션의 IsNew(이번에 받게 될 버전인지)는 백엔드가 isNewerVersion으로 계산해 넣는다.
 type NotesPayload struct {
-	LocalVersion string        `json:"localVersion"`
-	Sections     []NoteSection `json:"sections"`
+	Sections []NoteSection `json:"sections"`
 }
 
 // emitVersions는 헤더의 "현재 → 최신" 버전 표시를 갱신한다(remote는 모르면 "").
@@ -226,19 +234,28 @@ func (a *App) run() {
 	a.emitVersions(localVer, "")
 
 	// 업데이트 내역 패널은 업데이트 확인/다운로드와 무관하게 병렬로 채운다 — 이미 최신이어도
-	// 최근 내역을 보여주고, 업데이트가 있으면 다운로드가 도는 동안 읽을 수 있게.
+	// 최근 내역을 보여주고, 업데이트가 있으면 다운로드가 도는 동안 읽을 수 있게. 다만 NEW 표시는
+	// "드라이브에서 실제로 받을 수 있는 버전"까지만 붙여야 하므로(노트가 zip보다 먼저 갱신될 수
+	// 있음), 드라이브 최신 버전이 확인될 때까지(또는 run이 끝날 때까지) 기다렸다가 계산한다.
+	remoteKnown := make(chan string, 1)
+	var remoteOnce sync.Once
+	setRemote := func(v string) { remoteOnce.Do(func() { remoteKnown <- v }) }
+	defer setRemote("")
 	go func() {
-		runtime.EventsEmit(a.ctx, "notes", NotesPayload{LocalVersion: localVer, Sections: fetchReleaseNotes()})
+		sections := fetchReleaseNotes()
+		markNewSections(sections, localVer, <-remoteKnown)
+		runtime.EventsEmit(a.ctx, "notes", NotesPayload{Sections: sections})
 	}()
 
 	// 1. 파일 다운로드 없이 서버의 최신 버전 미리 검사
 	remoteZipName, remoteVer := getRemoteZipInfoWithoutDownload(folderURL)
 	if remoteVer != "" {
+		setRemote(remoteVer)
 		a.emitVersions(localVer, remoteVer)
 		a.status(fmt.Sprintf("드라이브 최신 파일 감지: %s (버전: %s)", remoteZipName, remoteVer))
 		if !isNewerVersion(remoteVer, localVer) {
 			a.status(">> 이미 최신 버전을 사용 중입니다.")
-			a.finish("이미 최신 버전을 사용 중입니다.", true)
+			a.finish("이미 최신 버전을 사용 중입니다.", true, false)
 			return
 		}
 		a.status(fmt.Sprintf(">> 새 버전(%s)이 발견되어 다운로드를 시작합니다!", remoteVer))
@@ -249,7 +266,7 @@ func (a *App) run() {
 	tempDir, err := os.MkdirTemp("", "gdrive_update_")
 	if err != nil {
 		a.status(fmt.Sprintf("[오류 발생] %v", err))
-		a.finish("업데이트 확인 중 오류가 발생했습니다.", false)
+		a.finish("업데이트 확인 중 오류가 발생했습니다.", false, true)
 		return
 	}
 	defer os.RemoveAll(tempDir)
@@ -259,7 +276,7 @@ func (a *App) run() {
 	entries, err := listDriveFolder(folderID, client)
 	if err != nil {
 		a.status(fmt.Sprintf("[오류 발생] %v", err))
-		a.finish("업데이트 확인 중 오류가 발생했습니다.", false)
+		a.finish("업데이트 확인 중 오류가 발생했습니다.", false, true)
 		return
 	}
 
@@ -272,10 +289,11 @@ func (a *App) run() {
 	}
 	if len(zipEntries) == 0 {
 		a.status("드라이브 폴더 내에 ZIP 파일이 없습니다.")
-		a.finish("드라이브 폴더 내에 ZIP 파일을 찾지 못했습니다.", false)
+		a.finish("드라이브 폴더 내에 ZIP 파일을 찾지 못했습니다.", false, true)
 		return
 	}
 	target := pickHighestVersion(zipEntries)
+	setRemote(target.ver)
 	if remoteVer == "" {
 		a.emitVersions(localVer, target.ver)
 	}
@@ -283,7 +301,7 @@ func (a *App) run() {
 	// 사전 검사를 안 거쳤던 경우 여기서 최종 체크
 	if remoteVer == "" && !isNewerVersion(target.ver, localVer) {
 		a.status(">> 이미 최신 버전을 사용 중입니다.")
-		a.finish("이미 최신 버전을 사용 중입니다.", true)
+		a.finish("이미 최신 버전을 사용 중입니다.", true, false)
 		return
 	}
 
@@ -291,7 +309,7 @@ func (a *App) run() {
 	// 확인한다 — 엉뚱한 폴더(소스 폴더, 다운로드 폴더 등)에서 실행됐다면 여기서 중단.
 	if safe, reason := isSafeInstallDir(targetDir); !safe {
 		a.status(fmt.Sprintf("[중단] %s", reason))
-		a.finish(reason, false)
+		a.finish(reason, false, true)
 		return
 	}
 
@@ -299,7 +317,7 @@ func (a *App) run() {
 	zipPath := filepath.Join(tempDir, target.name)
 	if err := downloadDriveFile(target.id, zipPath, client); err != nil {
 		a.status(fmt.Sprintf("[오류 발생] %v", err))
-		a.finish("업데이트 다운로드 중 오류가 발생했습니다.", false)
+		a.finish("업데이트 다운로드 중 오류가 발생했습니다.", false, true)
 		return
 	}
 
@@ -308,13 +326,13 @@ func (a *App) run() {
 	extractDir := filepath.Join(tempDir, "extracted")
 	if err := unzip(zipPath, extractDir); err != nil {
 		a.status(fmt.Sprintf("[오류 발생] %v", err))
-		a.finish("업데이트 적용 중 오류가 발생했습니다.", false)
+		a.finish("업데이트 적용 중 오류가 발생했습니다.", false, true)
 		return
 	}
 
 	if err := syncExtractedFiles(extractDir, targetDir, selfExeName()); err != nil {
 		a.status(fmt.Sprintf("[오류 발생] %v", err))
-		a.finish("업데이트 적용 중 오류가 발생했습니다.", false)
+		a.finish("업데이트 적용 중 오류가 발생했습니다.", false, true)
 		return
 	}
 
@@ -327,7 +345,7 @@ func (a *App) run() {
 	}
 
 	a.status("[성공] 업데이트가 완료되었습니다!")
-	a.finish("업데이트가 완료되었습니다.", false)
+	a.finish("업데이트가 완료되었습니다.", false, false)
 }
 
 // 공식 클라이언트의 통상적인 설치 경로. 사용자가 설치 위치를 바꿨을 수도 있으므로
@@ -360,10 +378,11 @@ func (a *App) BrowseForGameExe() string {
 // SaveGameSetup은 토치라이트 실행 방식(Steam App ID 또는 클라이언트 경로)을 저장한다.
 // 값은 사용자마다 다르므로 여기서 추측/기본값 지정 없이 프론트엔드가 입력받은 그대로 저장한다.
 func (a *App) SaveGameSetup(method, steamAppID, clientExePath string) {
-	a.prefs.GameLaunchMethod = method
-	a.prefs.GameSteamAppID = steamAppID
-	a.prefs.GameClientExePath = clientExePath
-	_ = savePrefs(a.prefs)
+	a.updatePrefs(func(p *Prefs) {
+		p.GameLaunchMethod = method
+		p.GameSteamAppID = steamAppID
+		p.GameClientExePath = clientExePath
+	})
 }
 
 // Confirm은 체크박스 화면의 "완료" 버튼(또는 자동 종료)에서 호출된다: 선택 상태를 다음
@@ -375,11 +394,12 @@ func (a *App) SaveGameSetup(method, steamAppID, clientExePath string) {
 // prefs로 저장하지 않는다 — 이건 "지금 감지된 이 특정 버전을 설치할지"에 대한 일회성
 // 선택이지, 매번 반복할 일반 설정이 아니기 때문이다.
 func (a *App) Confirm(launchOnClose, launchTTDNow, launchGameNow, createShortcutNow, installSelfUpdateNow bool) {
-	a.prefs.LaunchOnClose = launchOnClose
-	a.prefs.LaunchTTDAfterUpdate = launchTTDNow
-	a.prefs.LaunchGameAfterUpdate = launchGameNow
-	a.prefs.CreateDesktopShortcut = createShortcutNow
-	_ = savePrefs(a.prefs)
+	p := a.updatePrefs(func(p *Prefs) {
+		p.LaunchOnClose = launchOnClose
+		p.LaunchTTDAfterUpdate = launchTTDNow
+		p.LaunchGameAfterUpdate = launchGameNow
+		p.CreateDesktopShortcut = createShortcutNow
+	})
 
 	// 실패를 조용히 삼키면 사용자는 "완료를 눌러도 아무 반응이 없다"고만 느끼게 되므로,
 	// 창을 닫기 전에 무엇이 왜 실패했는지 대화상자로 보여준다.
@@ -390,8 +410,8 @@ func (a *App) Confirm(launchOnClose, launchTTDNow, launchGameNow, createShortcut
 				problems = append(problems, fmt.Sprintf("TTD 실행 실패: %v", err))
 			}
 		}
-		if launchGameNow && a.prefs.GameLaunchMethod != "" {
-			launchGame(a.prefs)
+		if launchGameNow && p.GameLaunchMethod != "" {
+			launchGame(p)
 		}
 	}
 
@@ -427,6 +447,20 @@ func (a *App) Confirm(launchOnClose, launchTTDNow, launchGameNow, createShortcut
 // SetTheme은 화면 테마 선택("light"/"dark", ""=시스템 설정)을 바로 저장한다 — 다른 옵션처럼
 // "완료" 때 모아 저장하지 않는 건, 테마는 누르는 즉시 화면에 반영되는 설정이라서다.
 func (a *App) SetTheme(theme string) {
-	a.prefs.Theme = theme
+	a.updatePrefs(func(p *Prefs) { p.Theme = theme })
+}
+
+// updatePrefs는 prefsMu를 잡은 채로 prefs를 고치고 저장한 뒤, 고친 결과의 사본을 돌려준다.
+func (a *App) updatePrefs(change func(*Prefs)) Prefs {
+	a.prefsMu.Lock()
+	defer a.prefsMu.Unlock()
+	change(&a.prefs)
 	_ = savePrefs(a.prefs)
+	return a.prefs
+}
+
+// FolderURL은 TTD 배포 구글 드라이브 폴더 주소다 — 프론트엔드의 "TTD 다운로드" 바로가기가
+// 업데이트 소스와 어긋나지 않게 같은 상수를 그대로 쓴다.
+func (a *App) FolderURL() string {
+	return folderURL
 }
