@@ -42,6 +42,8 @@ type App struct {
 	prefsMu sync.Mutex
 	prefs   Prefs
 
+	domReadyOnce sync.Once
+
 	// ttd_updater 자기 자신의 GitHub Releases 최신 버전 확인 결과. run() 시작 부분에서 한 번
 	// 채워지고, downloadURL이 비어있지 않으면 새 버전이 있다는 뜻이다.
 	selfUpdateVersion     string
@@ -56,11 +58,20 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.prefs = loadPrefs()
-	// 체크박스/실행 옵션은 업데이트 확인이 끝나길 기다리지 않고 창이 뜨자마자 보여준다 —
-	// 사용자가 다운로드 중에도 "종료 시 실행"류 설정을 미리 켜둘 수 있게 하기 위함. 실제로
-	// 그 선택이 적용되는 시점(완료 버튼 활성화)은 흐름이 "ready"에 도달한 뒤다.
-	runtime.EventsEmit(ctx, "init", a.prefsPayload())
-	go a.run()
+}
+
+// domReady는 페이지(app.js)가 로드돼 이벤트 리스너가 등록된 뒤에 호출된다. startup은 index.html
+// 로드 *전*에 불리기 때문에 거기서 보낸 이벤트("init", 첫 status 줄 등)는 화면이 받지 못하고
+// 버려진다 — 그래서 저장된 테마/체크박스가 업데이트가 끝난 "ready" 때에야 반영돼, 다운로드가 긴
+// 업데이트에서는 테마가 도중에 바뀌어 보였다. 새로고침 등으로 다시 불려도 업데이트는 한 번만.
+func (a *App) domReady(ctx context.Context) {
+	a.domReadyOnce.Do(func() {
+		// 체크박스/실행 옵션은 업데이트 확인이 끝나길 기다리지 않고 창이 뜨자마자 보여준다 —
+		// 사용자가 다운로드 중에도 "종료 시 실행"류 설정을 미리 켜둘 수 있게 하기 위함. 실제로
+		// 그 선택이 적용되는 시점(완료 버튼 활성화)은 흐름이 "ready"에 도달한 뒤다.
+		runtime.EventsEmit(ctx, "init", a.prefsPayload())
+		go a.run()
+	})
 }
 
 // isSafeInstallDir는 targetDir가 TTD 설치 폴더로 보이는지(또는 완전히 비어 있어 새로 설치해도
