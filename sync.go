@@ -49,20 +49,31 @@ var alwaysOverwrite = map[string]bool{
 	"json/map_alias.dat": true,
 }
 
+// appExeNames는 dir 바로 아래의 TTD 본체 실행 파일 이름들(TTD.exe 포함)을 돌려준다. 업데이터
+// 자신(selfExe)은 이름이 무엇이든 뺀다. 버전 판별·실행 중 감지·구버전 정리가 모두 같은 파일
+// 집합을 보도록 거르는 규칙을 여기 한 곳에 둔다.
+func appExeNames(dir, selfExe string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !isAppExeFile(name) || (selfExe != "" && strings.EqualFold(name, selfExe)) {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
 // findVersionedAppExe는 dir에서 고정 이름(TTD.exe)이 아닌, TTD3.4.1.exe처럼 버전이 붙은 앱
 // 실행 파일 중 가장 높은 버전의 이름을 찾는다(없으면 ""). 업데이터 자신(selfExe)은 제외.
 func findVersionedAppExe(dir, selfExe string) string {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
 	var cands []zipCandidate
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || strings.EqualFold(name, appExeName) || (selfExe != "" && strings.EqualFold(name, selfExe)) {
-			continue
-		}
-		if isAppExeFile(name) {
+	for _, name := range appExeNames(dir, selfExe) {
+		if !strings.EqualFold(name, appExeName) {
 			cands = append(cands, zipCandidate{name: name, ver: versionFromName(name)})
 		}
 	}
@@ -117,27 +128,66 @@ func resolveAppExePath(dir, selfExe string) string {
 // ERROR_ACCESS_DENIED(5)와 구별하려고 이 코드만 "실행 중"으로 본다.
 const errSharingViolation = syscall.Errno(32)
 
-// runningAppExe는 dir의 TTD 실행 파일(TTD.exe, TTD3.4.1.exe 등) 중 지금 실행 중이라 잠겨 있는
-// 것의 이름을 돌려준다(없으면 ""). 쓰기용으로 열어 보기만 하고 아무것도 쓰지 않는다(잘라내기 없음).
-// 실행 중인 exe는 덮어쓸 수 없어 syncExtractedFiles가 중간에 실패하므로, 파일을 하나라도 바꾸기
-// 전에 이걸로 먼저 확인한다.
-func runningAppExe(dir, selfExe string) string {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
+// isReadOnly는 파일에 쓰기 권한이 없는지(Windows의 읽기 전용 속성) 본다.
+func isReadOnly(info fs.FileInfo) bool {
+	return info.Mode().Perm()&0200 == 0
+}
+
+// isFileInUse는 path가 다른 프로세스에 잠겨 있는지(실행 중인 exe 등) 본다. 쓰기용으로 열어
+// 보기만 하고 아무것도 쓰지 않는다(잘라내기 없음).
+func isFileInUse(path string) bool {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err == nil {
+		f.Close()
+		return false
 	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !isAppExeFile(name) || (selfExe != "" && strings.EqualFold(name, selfExe)) {
-			continue
-		}
-		f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY, 0)
-		if err == nil {
-			f.Close()
-			continue
-		}
-		if errors.Is(err, errSharingViolation) {
+	if errors.Is(err, errSharingViolation) {
+		return true
+	}
+	// 읽기 전용 파일은 공유 위반보다 접근 거부가 먼저 나서 실행 중인지 알 수 없다 — 잠깐 속성을
+	// 풀고 다시 열어 본 뒤 원래 속성으로 돌려놓는다.
+	info, statErr := os.Stat(path)
+	if statErr != nil || !isReadOnly(info) || os.Chmod(path, 0666) != nil {
+		return false
+	}
+	defer os.Chmod(path, info.Mode().Perm())
+	f, err = os.OpenFile(path, os.O_WRONLY, 0)
+	if err == nil {
+		f.Close()
+		return false
+	}
+	return errors.Is(err, errSharingViolation)
+}
+
+// runningAppExe는 dir의 TTD 실행 파일(TTD.exe, TTD3.4.1.exe 등) 중 지금 실행 중이라 잠겨 있는
+// 것의 이름을 돌려준다(없으면 ""). 실행 중인 exe는 덮어쓸 수 없어 syncExtractedFiles가 중간에
+// 실패하므로, 파일을 하나라도 바꾸기 전에 이걸로 먼저 확인한다.
+func runningAppExe(dir, selfExe string) string {
+	for _, name := range appExeNames(dir, selfExe) {
+		if isFileInUse(filepath.Join(dir, name)) {
 			return name
+		}
+	}
+	return ""
+}
+
+// runningAppExeForSync는 압축 해제된 업데이트(srcDir)를 dstDir에 반영할 때 TTD.exe를 설치하게
+// 될 모든 폴더(보통 설치 폴더 하나, zip에 하위 폴더째 들어 있으면 그 폴더도)에서 실행 중인 TTD
+// 실행 파일을 찾아 dstDir 기준 상대 경로로 돌려준다(없으면 ""). 설치 폴더만 보면 하위 폴더의
+// TTD.exe가 실행 중일 때 놓쳐서 일부 파일만 바뀐 채 멈춘다.
+func runningAppExeForSync(srcDir, dstDir, selfExe string) string {
+	dirs := map[string]bool{".": true}
+	filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && isAppExeFile(d.Name()) {
+			if rel, relErr := filepath.Rel(srcDir, filepath.Dir(path)); relErr == nil {
+				dirs[rel] = true
+			}
+		}
+		return nil
+	})
+	for rel := range dirs {
+		if name := runningAppExe(filepath.Join(dstDir, rel), selfExe); name != "" {
+			return filepath.Join(rel, name)
 		}
 	}
 	return ""
@@ -218,15 +268,23 @@ func sameContent(a, b string) bool {
 }
 
 // copyFileAtomic은 dst.tmp에 끝까지 쓴 뒤 dst로 바꿔치기한다 — 디스크 부족 등으로 중간에
-// 실패해도 잘린 exe가 dst 이름으로 남지 않는다. 읽기 전용 dst는 속성을 풀고 덮어쓴다.
+// 실패해도 잘린 exe가 dst 이름으로 남지 않는다. 읽기 전용 dst는 속성을 풀고 한 번 더 시도하되,
+// 그래도 못 바꾸면(잠겨 있음 등) 원래 속성으로 돌려놓아 기존 파일을 건드리지 않은 상태로 둔다.
 func copyFileAtomic(src, dst string) error {
 	tmp := dst + ".tmp"
 	if err := copyFile(src, tmp); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	os.Chmod(dst, 0666) // 읽기 전용 해제(없거나 실패해도 아래 Rename이 판단)
-	if err := os.Rename(tmp, dst); err != nil {
+	err := os.Rename(tmp, dst)
+	if err != nil {
+		if info, statErr := os.Stat(dst); statErr == nil && isReadOnly(info) && os.Chmod(dst, 0666) == nil {
+			if err = os.Rename(tmp, dst); err != nil {
+				os.Chmod(dst, info.Mode().Perm())
+			}
+		}
+	}
+	if err != nil {
 		os.Remove(tmp)
 		return err
 	}
@@ -260,13 +318,13 @@ func backupExe(dir, src, name string) (string, error) {
 // 옮긴다. 옮기지 못해도 설치 폴더에는 절대 남기지 않는다 — getLocalVersion은 설치 폴더의
 // TTDx.y.z 파일명을 version_info.json보다 우선하므로, 남아 있으면 구버전으로 오인해 매번
 // 업데이트를 다시 받는다. 그래서 마지막 수단은 (예전 동작대로) 삭제다.
-func moveStaleExeToBackup(dir, name string) {
+func moveStaleExeToBackup(dir, name string, report func(string)) {
 	src := filepath.Join(dir, name)
 	if bdir, err := ensureBackupDir(dir); err == nil {
 		dst := filepath.Join(bdir, name)
 		if sameContent(src, dst) {
 			if os.Remove(src) == nil {
-				fmt.Printf("[구버전 정리] %s (이미 %s에 백업됨)\n", name, relToDir(dir, dst))
+				report(fmt.Sprintf("[구버전 정리] %s (이미 %s에 백업됨)", name, relToDir(dir, dst)))
 				return
 			}
 		} else {
@@ -274,15 +332,15 @@ func moveStaleExeToBackup(dir, name string) {
 				dst = filepath.Join(bdir, timestampedName(name)) // 다른 내용의 같은 이름 백업은 보존
 			}
 			if os.Rename(src, dst) == nil {
-				fmt.Printf("[구버전 백업] %s -> %s\n", name, relToDir(dir, dst))
+				report(fmt.Sprintf("[구버전 백업] %s -> %s", name, relToDir(dir, dst)))
 				return
 			}
 		}
 	}
 	if err := os.Remove(src); err == nil {
-		fmt.Printf("[구버전 삭제] %s (백업 폴더로 옮기지 못함)\n", name)
+		report(fmt.Sprintf("[경고] 구버전 %s을(를) 백업 폴더로 옮기지 못해 삭제했습니다.", name))
 	} else {
-		fmt.Printf("[경고] 구버전 %s 정리 실패(TTD 실행 중이면 종료 후 다시 시도): %v\n", name, err)
+		report(fmt.Sprintf("[경고] 구버전 %s 정리 실패(TTD 실행 중이면 종료 후 다시 시도): %v", name, err))
 	}
 }
 
@@ -297,7 +355,9 @@ func relToDir(dir, p string) string {
 // selfExe는 지금 실행 중인 업데이터 자신의 파일명으로, TTD.*로 시작해도(예: ttd_updater.exe)
 // "구버전 앱 실행파일" 정리 대상에서 반드시 제외해야 한다 - 그렇지 않으면 실행 중인 자기 자신을
 // 지우려다 OS에 의해 잠긴 파일 삭제 오류로 업데이트 전체가 실패한다.
-func syncExtractedFiles(srcDir, dstDir, selfExe string) error {
+// report는 백업 결과와 경고처럼 사용자가 꼭 봐야 할 줄을 받는다(업데이터 창 로그로 보냄).
+// 파일별 [신규 추가]/[TTD 업데이트] 줄은 너무 많아 콘솔에만 찍는다.
+func syncExtractedFiles(srcDir, dstDir, selfExe string, report func(string)) error {
 	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -351,20 +411,9 @@ func syncExtractedFiles(srcDir, dstDir, selfExe string) error {
 			// ttd_price.json/TTD_ver_note.txt 같은 다른 TTD 접두 자산은 건드리지 않음).
 			// 실행 중인 업데이터 자신(selfExe)은 절대 지우지 않는다.
 			// 지우지 않고 backup/ 폴더로 옮겨, 새 버전에 문제가 있으면 사용자가 되돌릴 수 있게 한다.
-			entries, _ := os.ReadDir(targetRoot)
-			for _, e := range entries {
-				if e.IsDir() {
-					continue
-				}
-				oldName := e.Name()
-				if strings.EqualFold(oldName, appExeName) {
-					continue
-				}
-				if selfExe != "" && strings.EqualFold(oldName, selfExe) {
-					continue
-				}
-				if isAppExeFile(oldName) {
-					moveStaleExeToBackup(targetRoot, oldName)
+			for _, oldName := range appExeNames(targetRoot, selfExe) {
+				if !strings.EqualFold(oldName, appExeName) {
+					moveStaleExeToBackup(targetRoot, oldName, report)
 				}
 			}
 
@@ -372,9 +421,9 @@ func syncExtractedFiles(srcDir, dstDir, selfExe string) error {
 			// TTD.exe가 어느 버전인지와 무관하게 각 버전의 원본 파일을 보관한다. 백업은 부가 기능이라
 			// 실패해도 경고만 남기고 업데이트(TTD.exe 교체)는 계속한다.
 			if saved, bErr := backupExe(targetRoot, path, fileName); bErr != nil {
-				fmt.Printf("[경고] %s 백업 실패(업데이트는 계속): %v\n", fileName, bErr)
+				report(fmt.Sprintf("[경고] %s 백업 실패(업데이트는 계속): %v", fileName, bErr))
 			} else {
-				fmt.Printf("[신규 버전 백업] %s -> %s\n", fileName, relToDir(targetRoot, saved))
+				report(fmt.Sprintf("[신규 버전 백업] %s -> %s", fileName, relToDir(dstDir, saved)))
 			}
 
 			if err := copyFile(path, dstFilePath); err != nil {

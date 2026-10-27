@@ -356,9 +356,14 @@ func (a *App) run() {
 // ensureTTDNotRunning은 TTD가 실행 중이면(TTD.exe가 잠겨 덮어쓸 수 없으면) 업데이트를 대기
 // 상태로 되돌리고 안내를 띄운 뒤 false를 돌려준다 — 사용자는 TTD를 끄고 같은 "업데이트" 버튼을
 // 다시 누르면 된다. 파일을 하나라도 바꾸기 전에 확인해야 일부 파일만 새 버전으로 바뀐 채
-// 멈추는 일이 없다.
-func (a *App) ensureTTDNotRunning(p pendingUpdate) bool {
-	name := runningAppExe(targetDir, selfExeName())
+// 멈추는 일이 없다. extractDir를 주면(압축 해제 후) zip이 TTD.exe를 설치할 하위 폴더까지 본다.
+func (a *App) ensureTTDNotRunning(p pendingUpdate, extractDir string) bool {
+	var name string
+	if extractDir == "" {
+		name = runningAppExe(targetDir, selfExeName())
+	} else {
+		name = runningAppExeForSync(extractDir, targetDir, selfExeName())
+	}
 	if name == "" {
 		return true
 	}
@@ -375,6 +380,10 @@ func (a *App) ensureTTDNotRunning(p pendingUpdate) bool {
 type pendingUpdate struct {
 	target  zipCandidate
 	saveVer string // 적용 후 version_info.json에 기록할 버전
+	// tempDir는 이미 zip을 받아 둔 임시 폴더다(다운로드 후 TTD 실행 중이라 막혔을 때만 설정).
+	// 다시 누르면 zip을 또 받지 않고 이걸 쓴다. 그대로 창을 닫으면 다음 실행 때
+	// cleanupStaleTempDirs가 지운다.
+	tempDir string
 }
 
 // StartUpdate는 "업데이트" 버튼에서 호출된다. 대기 중인 업데이트를 백그라운드에서 받아 적용하고,
@@ -391,31 +400,43 @@ func (a *App) StartUpdate() {
 
 // applyUpdate는 대기 중이던 업데이트의 다운로드 → 압축 해제 → 파일 반영을 수행한다.
 func (a *App) applyUpdate(p pendingUpdate) {
-	if !a.ensureTTDNotRunning(p) {
+	if !a.ensureTTDNotRunning(p, "") {
 		return
 	}
 	target := p.target
-	client := newHTTPClient(60 * time.Second)
 
-	tempDir, err := os.MkdirTemp("", "gdrive_update_")
-	if err != nil {
-		a.status(fmt.Sprintf("[오류 발생] %v", err))
-		a.finish("업데이트 준비 중 오류가 발생했습니다.", false, true)
-		return
-	}
-	defer os.RemoveAll(tempDir)
-
-	a.status(fmt.Sprintf("파일 다운로드 중... (%s)", target.name))
+	tempDir := p.tempDir
 	zipPath := filepath.Join(tempDir, target.name)
-	if err := downloadDriveFile(target.id, zipPath, client); err != nil {
-		a.status(fmt.Sprintf("[오류 발생] %v", err))
-		a.finish("업데이트 다운로드 중 오류가 발생했습니다.", false, true)
-		return
+	if _, statErr := os.Stat(zipPath); tempDir == "" || statErr != nil {
+		var err error
+		tempDir, err = os.MkdirTemp("", "gdrive_update_")
+		if err != nil {
+			a.status(fmt.Sprintf("[오류 발생] %v", err))
+			a.finish("업데이트 준비 중 오류가 발생했습니다.", false, true)
+			return
+		}
+		zipPath = filepath.Join(tempDir, target.name)
+		a.status(fmt.Sprintf("파일 다운로드 중... (%s)", target.name))
+		if err := downloadDriveFile(target.id, zipPath, newHTTPClient(60*time.Second)); err != nil {
+			os.RemoveAll(tempDir)
+			a.status(fmt.Sprintf("[오류 발생] %v", err))
+			a.finish("업데이트 다운로드 중 오류가 발생했습니다.", false, true)
+			return
+		}
+	} else {
+		a.status(fmt.Sprintf("이미 받은 파일을 사용합니다. (%s)", target.name))
 	}
+	keepTemp := false
+	defer func() {
+		if !keepTemp {
+			os.RemoveAll(tempDir)
+		}
+	}()
 
 	// 3. 압축 해제 및 파일 반영
 	a.status("압축 해제 및 파일 적용 중...")
 	extractDir := filepath.Join(tempDir, "extracted")
+	os.RemoveAll(extractDir) // 받아 둔 zip을 다시 쓰는 경우 이전 압축 해제 결과를 비운다
 	if err := unzip(zipPath, extractDir); err != nil {
 		a.status(fmt.Sprintf("[오류 발생] %v", err))
 		a.finish("업데이트 적용 중 오류가 발생했습니다.", false, true)
@@ -423,10 +444,13 @@ func (a *App) applyUpdate(p pendingUpdate) {
 	}
 
 	// 다운로드하는 동안 TTD를 켰을 수도 있으니 파일을 바꾸기 직전에 한 번 더 확인한다.
-	if !a.ensureTTDNotRunning(p) {
+	// 막히면 받은 zip은 남겨 두고 다시 누를 때 그대로 쓴다.
+	p.tempDir = tempDir
+	if !a.ensureTTDNotRunning(p, extractDir) {
+		keepTemp = true
 		return
 	}
-	if err := syncExtractedFiles(extractDir, targetDir, selfExeName()); err != nil {
+	if err := syncExtractedFiles(extractDir, targetDir, selfExeName(), a.status); err != nil {
 		a.status(fmt.Sprintf("[오류 발생] %v", err))
 		a.finish("업데이트 적용 중 오류가 발생했습니다.", false, true)
 		return
