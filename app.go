@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -368,13 +369,18 @@ func (a *App) ensureTTDNotRunning(p pendingUpdate, extractDir string) bool {
 	if name == "" {
 		return true
 	}
-	msg := fmt.Sprintf("TTD(%s)가 실행 중이라 업데이트할 수 없습니다. TTD를 종료한 뒤 다시 \"업데이트\" 버튼을 눌러 주세요.", name)
+	a.blockUpdate(p, fmt.Sprintf("TTD(%s)가 실행 중이라 업데이트할 수 없습니다. TTD를 종료한 뒤 다시 \"업데이트\" 버튼을 눌러 주세요.", name))
+	return false
+}
+
+// blockUpdate는 지금은 업데이트를 진행할 수 없어 대기 상태로 되돌린다 — "업데이트" 버튼이 다시
+// 살아나고 프론트엔드가 msg를 대화상자로 띄우므로, 원인이 풀리면 창을 다시 열지 않고 재시도할 수 있다.
+func (a *App) blockUpdate(p pendingUpdate, msg string) {
 	a.status("[중단] " + msg)
 	a.updateMu.Lock()
 	a.pending = &p
 	a.updateMu.Unlock()
 	a.emitReady(ReadyPayload{Message: msg, UpdateAvailable: true, UpdateVersion: p.saveVer, Blocked: true})
-	return false
 }
 
 // pendingUpdate는 확인은 끝났지만 아직 사용자가 설치를 확정하지 않은 업데이트다.
@@ -420,8 +426,15 @@ func (a *App) applyUpdate(p pendingUpdate) {
 		a.status(fmt.Sprintf("파일 다운로드 중... (%s)", target.name))
 		if err := downloadDriveFile(target.id, zipPath, newHTTPClient(60*time.Second)); err != nil {
 			os.RemoveAll(tempDir)
+			if errors.Is(err, errDriveQuota) {
+				p.tempDir = ""
+				a.blockUpdate(p, "구글 드라이브의 다운로드 한도를 초과해 지금은 TTD를 받을 수 없습니다. "+
+					"새 버전이 나온 직후 사용자가 몰리면 생기며, 최대 24시간 걸릴 수 있습니다. "+
+					"잠시 후 다시 \"업데이트\" 버튼을 누르거나, \"TTD 다운로드\"에서 직접 받아 주세요.")
+				return
+			}
 			a.status(fmt.Sprintf("[오류 발생] %v", err))
-			a.finish("업데이트 다운로드 중 오류가 발생했습니다.", false, true)
+			a.finish(fmt.Sprintf("업데이트 다운로드 실패: %v", err), false, true)
 			return
 		}
 	} else {
