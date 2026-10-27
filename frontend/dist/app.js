@@ -289,6 +289,12 @@ window.runtime.EventsOn("ready", (payload) => {
   if (payload.alreadyLatest) {
     startAutoClose(5);
   }
+
+  // TTD 실행 중이라 업데이트가 막힌 경우 — 헤더 문구만으로는 놓치기 쉬워 대화상자로도 알린다.
+  // 업데이트 버튼은 위에서 다시 살아나 있으므로 TTD를 끄고 그대로 다시 누르면 된다.
+  if (payload.blocked) {
+    alert(payload.message);
+  }
 });
 
 gameSetupBtn.addEventListener("click", async () => {

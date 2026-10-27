@@ -173,6 +173,7 @@ type ReadyPayload struct {
 	Error               bool   `json:"error"`
 	UpdateAvailable     bool   `json:"updateAvailable"` // 새 버전 확인됨, 사용자 확정 대기 중
 	UpdateVersion       string `json:"updateVersion"`
+	Blocked             bool   `json:"blocked"` // TTD 실행 중이라 업데이트를 못 해 대기로 되돌림
 	SelfUpdateAvailable bool   `json:"selfUpdateAvailable"`
 	SelfUpdateVersion   string `json:"selfUpdateVersion"`
 	PrefsPayload
@@ -343,7 +344,29 @@ func (a *App) run() {
 	a.pending = &pendingUpdate{target: target, saveVer: saveVer}
 	a.updateMu.Unlock()
 	a.status(fmt.Sprintf(">> v%s 업데이트를 설치할 수 있습니다. 아래 \"업데이트\" 버튼을 눌러 주세요.", saveVer))
+	// 버튼을 누르기 전에 미리 알려 준다(실제 차단은 applyUpdate의 ensureTTDNotRunning이 한다).
+	if name := runningAppExe(targetDir, selfExeName()); name != "" {
+		a.status(fmt.Sprintf("[안내] TTD(%s)가 실행 중입니다. 업데이트하려면 먼저 TTD를 종료해 주세요.", name))
+	}
 	a.finishWithUpdate(saveVer)
+}
+
+// ensureTTDNotRunning은 TTD가 실행 중이면(TTD.exe가 잠겨 덮어쓸 수 없으면) 업데이트를 대기
+// 상태로 되돌리고 안내를 띄운 뒤 false를 돌려준다 — 사용자는 TTD를 끄고 같은 "업데이트" 버튼을
+// 다시 누르면 된다. 파일을 하나라도 바꾸기 전에 확인해야 일부 파일만 새 버전으로 바뀐 채
+// 멈추는 일이 없다.
+func (a *App) ensureTTDNotRunning(p pendingUpdate) bool {
+	name := runningAppExe(targetDir, selfExeName())
+	if name == "" {
+		return true
+	}
+	msg := fmt.Sprintf("TTD(%s)가 실행 중이라 업데이트할 수 없습니다. TTD를 종료한 뒤 다시 \"업데이트\" 버튼을 눌러 주세요.", name)
+	a.status("[중단] " + msg)
+	a.updateMu.Lock()
+	a.pending = &p
+	a.updateMu.Unlock()
+	a.emitReady(ReadyPayload{Message: msg, UpdateAvailable: true, UpdateVersion: p.saveVer, Blocked: true})
+	return false
 }
 
 // pendingUpdate는 확인은 끝났지만 아직 사용자가 설치를 확정하지 않은 업데이트다.
@@ -366,6 +389,9 @@ func (a *App) StartUpdate() {
 
 // applyUpdate는 대기 중이던 업데이트의 다운로드 → 압축 해제 → 파일 반영을 수행한다.
 func (a *App) applyUpdate(p pendingUpdate) {
+	if !a.ensureTTDNotRunning(p) {
+		return
+	}
 	target := p.target
 	client := newHTTPClient(60 * time.Second)
 
@@ -394,6 +420,10 @@ func (a *App) applyUpdate(p pendingUpdate) {
 		return
 	}
 
+	// 다운로드하는 동안 TTD를 켰을 수도 있으니 파일을 바꾸기 직전에 한 번 더 확인한다.
+	if !a.ensureTTDNotRunning(p) {
+		return
+	}
 	if err := syncExtractedFiles(extractDir, targetDir, selfExeName()); err != nil {
 		a.status(fmt.Sprintf("[오류 발생] %v", err))
 		a.finish("업데이트 적용 중 오류가 발생했습니다.", false, true)
