@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -25,28 +26,40 @@ type githubReleaseAsset struct {
 
 type githubRelease struct {
 	TagName     string               `json:"tag_name"`
+	Draft       bool                 `json:"draft"`
+	Prerelease  bool                 `json:"prerelease"`
 	Body        string               `json:"body"`
 	PublishedAt string               `json:"published_at"`
 	Assets      []githubReleaseAsset `json:"assets"`
 }
 
+// 런처 노트 카드로 보여줄 최대 릴리즈 수(최신순). 한참 뒤처진 사용자라도 패널이 끝없이
+// 길어지지 않게 한다.
+const maxLauncherNotes = 10
+
 // selfUpdateInfo는 설치할 수 있는 ttd_updater 새 버전 정보다. Notes는 업데이트 내역 패널 맨 위
-// "런처" 카드로 보여줄 릴리즈 노트(TTD 노트와 같은 NoteSection 형식)다.
+// "런처" 카드로 보여줄 릴리즈 노트들(현재 버전보다 새로운 것, 최신순, TTD 노트와 같은
+// NoteSection 형식)이다.
 type selfUpdateInfo struct {
 	Version     string
 	DownloadURL string
 	Size        int64
-	Notes       NoteSection
+	Notes       []NoteSection
 }
 
-// checkSelfUpdate는 GitHub Releases에서 ttd_updater 자신의 최신 버전을 확인한다. 네트워크
+// checkSelfUpdate는 GitHub Releases에서 ttd_updater 자신의 새 버전을 확인한다. 네트워크
 // 문제나 API 오류가 나도 이건 부가 기능일 뿐이므로 에러를 그냥 삼키고 "새 버전 없음"으로
 // 취급한다 — TTD 본체 업데이트 흐름을 절대 막지 않는다.
+//
+// /releases/latest 대신 릴리즈 목록을 한 번에 받는다 — 두 버전 이상 뒤처진 사용자에게도
+// 사이 버전들의 노트까지 보여주기 위해서다. 목록에는 /releases/latest가 알아서 빼 주던
+// 초안(draft)·미리보기(prerelease)도 섞여 오므로 여기서 직접 걸러낸다. 설치 대상은
+// ttd_updater.exe가 첨부된 것 중 가장 높은 버전이다.
 func checkSelfUpdate() (selfUpdateInfo, bool) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest(
 		"GET",
-		fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", updaterRepo),
+		fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=30", updaterRepo),
 		nil,
 	)
 	if err != nil {
@@ -61,27 +74,49 @@ func checkSelfUpdate() (selfUpdateInfo, bool) {
 	}
 	defer resp.Body.Close()
 
-	var rel githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	var rels []githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
 		return selfUpdateInfo{}, false
 	}
 
-	latestVer := strings.TrimPrefix(rel.TagName, "v")
-	if !isNewerVersion(latestVer, updaterVersion) {
-		return selfUpdateInfo{}, false
-	}
-
-	for _, asset := range rel.Assets {
-		if asset.Name == "ttd_updater.exe" {
-			return selfUpdateInfo{
-				Version:     latestVer,
-				DownloadURL: asset.BrowserDownloadURL,
-				Size:        asset.Size,
-				Notes:       releaseNoteSection(latestVer, rel.PublishedAt, rel.Body),
-			}, true
+	var info selfUpdateInfo
+	var newer []githubRelease
+	for _, rel := range rels {
+		ver := strings.TrimPrefix(rel.TagName, "v")
+		if rel.Draft || rel.Prerelease || !isNewerVersion(ver, updaterVersion) {
+			continue
+		}
+		newer = append(newer, rel)
+		if info.Version != "" && !isNewerVersion(ver, info.Version) {
+			continue
+		}
+		for _, asset := range rel.Assets {
+			if asset.Name == "ttd_updater.exe" {
+				info.Version = ver
+				info.DownloadURL = asset.BrowserDownloadURL
+				info.Size = asset.Size
+			}
 		}
 	}
-	return selfUpdateInfo{}, false
+	if info.Version == "" {
+		return selfUpdateInfo{}, false
+	}
+
+	// 노트는 최신순으로, 설치할 버전까지만(그보다 새 릴리즈는 exe가 없어 설치되지 않음).
+	sort.Slice(newer, func(i, j int) bool {
+		return isNewerVersion(strings.TrimPrefix(newer[i].TagName, "v"), strings.TrimPrefix(newer[j].TagName, "v"))
+	})
+	for _, rel := range newer {
+		ver := strings.TrimPrefix(rel.TagName, "v")
+		if isNewerVersion(ver, info.Version) {
+			continue
+		}
+		if len(info.Notes) == maxLauncherNotes {
+			break
+		}
+		info.Notes = append(info.Notes, releaseNoteSection(ver, rel.PublishedAt, rel.Body))
+	}
+	return info, true
 }
 
 // releaseNoteSection은 GitHub 릴리즈 본문(Markdown)을 업데이트 내역 카드 형식으로 바꾼다.
