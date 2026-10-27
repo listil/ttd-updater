@@ -24,14 +24,25 @@ type githubReleaseAsset struct {
 }
 
 type githubRelease struct {
-	TagName string               `json:"tag_name"`
-	Assets  []githubReleaseAsset `json:"assets"`
+	TagName     string               `json:"tag_name"`
+	Body        string               `json:"body"`
+	PublishedAt string               `json:"published_at"`
+	Assets      []githubReleaseAsset `json:"assets"`
+}
+
+// selfUpdateInfo는 설치할 수 있는 ttd_updater 새 버전 정보다. Notes는 업데이트 내역 패널 맨 위
+// "런처" 카드로 보여줄 릴리즈 노트(TTD 노트와 같은 NoteSection 형식)다.
+type selfUpdateInfo struct {
+	Version     string
+	DownloadURL string
+	Size        int64
+	Notes       NoteSection
 }
 
 // checkSelfUpdate는 GitHub Releases에서 ttd_updater 자신의 최신 버전을 확인한다. 네트워크
 // 문제나 API 오류가 나도 이건 부가 기능일 뿐이므로 에러를 그냥 삼키고 "새 버전 없음"으로
 // 취급한다 — TTD 본체 업데이트 흐름을 절대 막지 않는다.
-func checkSelfUpdate() (version, downloadURL string, size int64, ok bool) {
+func checkSelfUpdate() (selfUpdateInfo, bool) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest(
 		"GET",
@@ -39,33 +50,68 @@ func checkSelfUpdate() (version, downloadURL string, size int64, ok bool) {
 		nil,
 	)
 	if err != nil {
-		return "", "", 0, false
+		return selfUpdateInfo{}, false
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", browserUserAgent)
 
 	resp, err := client.Do(req)
 	if err != nil || resp.StatusCode != 200 {
-		return "", "", 0, false
+		return selfUpdateInfo{}, false
 	}
 	defer resp.Body.Close()
 
 	var rel githubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return "", "", 0, false
+		return selfUpdateInfo{}, false
 	}
 
 	latestVer := strings.TrimPrefix(rel.TagName, "v")
 	if !isNewerVersion(latestVer, updaterVersion) {
-		return "", "", 0, false
+		return selfUpdateInfo{}, false
 	}
 
 	for _, asset := range rel.Assets {
 		if asset.Name == "ttd_updater.exe" {
-			return latestVer, asset.BrowserDownloadURL, asset.Size, true
+			return selfUpdateInfo{
+				Version:     latestVer,
+				DownloadURL: asset.BrowserDownloadURL,
+				Size:        asset.Size,
+				Notes:       releaseNoteSection(latestVer, rel.PublishedAt, rel.Body),
+			}, true
 		}
 	}
-	return "", "", 0, false
+	return selfUpdateInfo{}, false
+}
+
+// releaseNoteSection은 GitHub 릴리즈 본문(Markdown)을 업데이트 내역 카드 형식으로 바꾼다.
+// 프론트엔드의 renderNoteLine이 "*"를 소제목, "-"를 항목으로 해석하므로 Markdown 제목(#)은
+// "*"로, 목록 머리표(* / +)는 "-"로 맞추고, 굵게/코드 표시 기호는 걷어낸다.
+func releaseNoteSection(version, publishedAt, body string) NoteSection {
+	strip := strings.NewReplacer("**", "", "`", "")
+	var lines []string
+	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(strip.Replace(line))
+		switch {
+		case strings.HasPrefix(line, "#"):
+			line = "* " + strings.TrimSpace(strings.TrimLeft(line, "#"))
+		case strings.HasPrefix(line, "* "), strings.HasPrefix(line, "+ "):
+			line = "- " + line[2:]
+		}
+		lines = append(lines, line)
+	}
+	// 앞뒤 빈 줄은 카드에 쓸데없는 여백만 만든다.
+	for len(lines) > 0 && lines[0] == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	date := publishedAt
+	if len(date) >= 10 {
+		date = strings.ReplaceAll(date[:10], "-", ".") // 2026-10-27T… → 2026.10.27 (TTD 노트와 같은 표기)
+	}
+	return NoteSection{Version: version, Date: date, Lines: lines}
 }
 
 // downloadSelfUpdate는 새 ttd_updater.exe를 자기 자신 옆에 "ttd_updater.exe.new"로 받아둔다.

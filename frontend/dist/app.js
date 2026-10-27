@@ -25,6 +25,9 @@ const selfUpdateLabel = document.getElementById("selfUpdateLabel");
 
 const notesEl = document.getElementById("notes");
 const notesBadge = document.getElementById("notesBadge");
+const notesListEl = document.getElementById("notesList");
+const launcherNoteEl = document.getElementById("launcherNote");
+const selfNotesBtn = document.getElementById("selfNotesBtn");
 const localVerEl = document.getElementById("localVer");
 const remoteVerEl = document.getElementById("remoteVer");
 const progressBar = document.getElementById("progressBar");
@@ -57,14 +60,42 @@ function renderNoteLine(text) {
   return el;
 }
 
+// ttd_updater 자신의 새 버전 릴리즈 노트 — TTD 노트 목록과 따로 맨 위 카드에 그린다
+// ("notes"가 목록을 다시 그려도 지워지지 않게 #notesList 밖에 둔다). 카드는 숨겨 두고,
+// 자체 업데이트 체크박스 옆 "변경 내용" 링크로 여닫는다 — 업데이트 내역은 TTD 노트가 주인공이다.
+function renderLauncherNote(s) {
+  const head = document.createElement("div");
+  head.className = "note-head";
+  const tag = document.createElement("span");
+  tag.className = "note-tag";
+  tag.textContent = "런처";
+  const ver = document.createElement("span");
+  ver.className = "note-ver";
+  ver.textContent = "ttd_updater v" + s.version;
+  const badge = document.createElement("span");
+  badge.className = "note-new";
+  badge.textContent = "NEW";
+  const date = document.createElement("span");
+  date.className = "note-date";
+  date.textContent = s.date || "";
+  head.append(tag, ver, badge, date);
+
+  const body = document.createElement("div");
+  body.className = "note-body";
+  for (const line of s.lines || []) body.appendChild(renderNoteLine(line));
+
+  launcherNoteEl.replaceChildren(head, body);
+  selfNotesBtn.hidden = false;
+}
+
 function renderNotes(payload) {
-  notesEl.replaceChildren();
+  notesListEl.replaceChildren();
   const sections = payload.sections || [];
   if (sections.length === 0) {
     const empty = document.createElement("div");
     empty.className = "notes-empty";
     empty.textContent = "업데이트 내역을 불러오지 못했습니다.";
-    notesEl.appendChild(empty);
+    notesListEl.appendChild(empty);
     return;
   }
 
@@ -101,7 +132,7 @@ function renderNotes(payload) {
     for (const line of s.lines || []) body.appendChild(renderNoteLine(line));
 
     card.append(head, body);
-    notesEl.appendChild(card);
+    notesListEl.appendChild(card);
   }
 
   notesBadge.hidden = newVersions.size === 0;
@@ -216,6 +247,16 @@ window.runtime.EventsOn("status", (text) => {
 
 // 업데이트 확인과 병렬로 받아온 업데이트 내역(최신 섹션들) — 왼쪽 패널에 그린다.
 window.runtime.EventsOn("notes", renderNotes);
+window.runtime.EventsOn("selfNotes", renderLauncherNote);
+
+// "변경 내용" → 업데이트 내역 맨 위에 런처 카드를 열고(맨 위로 스크롤), 다시 누르면 닫는다.
+selfNotesBtn.addEventListener("click", () => {
+  cancelAutoClose();
+  const open = launcherNoteEl.hidden;
+  launcherNoteEl.hidden = !open;
+  selfNotesBtn.textContent = open ? "닫기" : "변경 내용";
+  if (open) notesEl.scrollTo({ top: 0, behavior: "smooth" });
+});
 
 window.runtime.EventsOn("versions", (v) => {
   localVerEl.textContent = v.local && v.local !== "0.0.0" ? "v" + v.local : "없음";
@@ -281,7 +322,7 @@ window.runtime.EventsOn("ready", (payload) => {
 
   if (payload.selfUpdateAvailable) {
     selfUpdateSection.hidden = false;
-    selfUpdateLabel.textContent = `종료 시 ttd_updater 새 버전(v${payload.selfUpdateVersion}) 설치`;
+    selfUpdateLabel.textContent = `종료 시 런처 v${payload.selfUpdateVersion} 설치`;
   } else {
     selfUpdateSection.hidden = true;
     installSelfUpdate.checked = false;
@@ -407,3 +448,8 @@ document.querySelectorAll(".link-chip").forEach((b) =>
     window.runtime.BrowserOpenURL(url);
   })
 );
+
+// 헤더 "업데이트 · 런처" 옆에 런처 자신의 현재 버전을 표시한다.
+window.go.main.App.UpdaterVersion().then((v) => {
+  document.getElementById("updaterVer").textContent = "v" + v;
+});

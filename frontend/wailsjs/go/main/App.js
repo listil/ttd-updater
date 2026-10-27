@@ -33,3 +33,7 @@ export function SetTheme(arg1) {
 export function StartUpdate() {
   return window['go']['main']['App']['StartUpdate']();
 }
+
+export function UpdaterVersion() {
+  return window['go']['main']['App']['UpdaterVersion']();
+}

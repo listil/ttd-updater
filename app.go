@@ -252,11 +252,12 @@ func (a *App) run() {
 
 	// ttd_updater 자신의 새 버전 확인은 TTD 본체 업데이트와 완전히 무관한 부가 기능이라,
 	// 실패해도(네트워크 문제, API 오류 등) 조용히 넘어가고 본 흐름을 막지 않는다.
-	if v, url, size, ok := checkSelfUpdate(); ok {
-		a.selfUpdateVersion = v
-		a.selfUpdateDownloadURL = url
-		a.selfUpdateSize = size
-		a.status(fmt.Sprintf("ttd_updater 새 버전(v%s)이 있습니다.", v))
+	if info, ok := checkSelfUpdate(); ok {
+		a.selfUpdateVersion = info.Version
+		a.selfUpdateDownloadURL = info.DownloadURL
+		a.selfUpdateSize = info.Size
+		a.status(fmt.Sprintf("ttd_updater 새 버전(v%s)이 있습니다.", info.Version))
+		runtime.EventsEmit(a.ctx, "selfNotes", info.Notes)
 	}
 
 	a.status("=== 구글 드라이브 업데이트 확인 중 ===")
@@ -591,4 +592,9 @@ func (a *App) updatePrefs(change func(*Prefs)) Prefs {
 // 업데이트 소스와 어긋나지 않게 같은 상수를 그대로 쓴다.
 func (a *App) FolderURL() string {
 	return folderURL
+}
+
+// UpdaterVersion은 이 런처(ttd_updater) 빌드 자신의 버전이다 — 헤더 "업데이트 · 런처 vX" 표시용.
+func (a *App) UpdaterVersion() string {
+	return updaterVersion
 }

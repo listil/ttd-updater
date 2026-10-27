@@ -16,3 +16,5 @@ export function SetSkipUpdate(arg1:string,arg2:boolean):Promise<void>;
 export function SetTheme(arg1:string):Promise<void>;
 
 export function StartUpdate():Promise<void>;
+
+export function UpdaterVersion():Promise<string>;

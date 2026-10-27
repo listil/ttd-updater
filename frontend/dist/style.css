@@ -237,6 +237,28 @@ body {
   color: var(--accent);
 }
 
+/* ttd_updater 자체 새 버전 카드 — "변경 내용"으로 열면 TTD 노트와 구분되게 배경을 깔고 목록 맨 위에 둔다. */
+.launcher-note {
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+
+.launcher-note .note-ver {
+  color: var(--accent);
+}
+
+.note-tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
 .note-body {
   line-height: 1.6;
   word-break: keep-all;
@@ -656,4 +678,15 @@ button.link-btn {
 .progress-bar.pending {
   background: var(--accent);
   opacity: 0.35;
+}
+
+/* 체크박스 줄 오른쪽 끝 링크(자체 업데이트 "변경 내용") — 안쪽 label이 줄 여백을 두 번 갖지 않게,
+   긴 라벨이 줄바꿈되어도 링크는 한 줄로 남게. */
+#selfUpdateSection .row .row {
+  margin: 0;
+}
+
+#selfNotesBtn {
+  flex: none;
+  white-space: nowrap;
 }
