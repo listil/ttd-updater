@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -55,4 +56,20 @@ func unzip(zipPath, destDir string) error {
 		}
 	}
 	return nil
+}
+
+// checkTTDZip은 사용자가 직접 고른 zip이 TTD 배포본인지 적용 전에 확인한다 — 열리는 zip인지
+// (브라우저에서 받다가 끊긴 파일은 여기서 걸린다), 안에 TTD 실행 파일이 있는지.
+func checkTTDZip(path string) error {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return fmt.Errorf("zip 파일을 열 수 없습니다. 받다가 끊겼을 수 있으니 다시 받아 주세요. (%v)", err)
+	}
+	defer r.Close()
+	for _, f := range r.File {
+		if isAppExeFile(filepath.Base(f.Name)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("선택한 zip 안에 TTD 실행 파일(TTD*.exe)이 없습니다. TTD 배포 zip이 맞는지 확인해 주세요")
 }

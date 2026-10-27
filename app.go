@@ -171,12 +171,16 @@ func (a *App) prefsPayload() PrefsPayload {
 
 // ReadyPayload는 업데이트 흐름이 끝났을 때(성공/이미 최신/오류) 프론트엔드로 보내는 최종 상태다.
 type ReadyPayload struct {
-	Message             string `json:"message"`
-	AlreadyLatest       bool   `json:"alreadyLatest"`
-	Error               bool   `json:"error"`
-	UpdateAvailable     bool   `json:"updateAvailable"` // 새 버전 확인됨, 사용자 확정 대기 중
-	UpdateVersion       string `json:"updateVersion"`
-	Blocked             bool   `json:"blocked"` // TTD 실행 중이라 업데이트를 못 해 대기로 되돌림
+	Message         string `json:"message"`
+	AlreadyLatest   bool   `json:"alreadyLatest"`
+	Error           bool   `json:"error"`
+	UpdateAvailable bool   `json:"updateAvailable"` // 새 버전 확인됨, 사용자 확정 대기 중
+	UpdateVersion   string `json:"updateVersion"`
+	Blocked         bool   `json:"blocked"` // TTD 실행 중이라 업데이트를 못 해 대기로 되돌림
+	// DownloadFailed면 드라이브에서 받지 못해 대기로 되돌린 상태다 — 프론트엔드가 ManualURL(그 zip의
+	// 드라이브 페이지)로 "업데이트 수동으로 받기"와 "받은 zip으로 업데이트" 버튼을 보여준다.
+	DownloadFailed      bool   `json:"downloadFailed"`
+	ManualURL           string `json:"manualUrl"`
 	SelfUpdateAvailable bool   `json:"selfUpdateAvailable"`
 	SelfUpdateVersion   string `json:"selfUpdateVersion"`
 	PrefsPayload
@@ -383,6 +387,91 @@ func (a *App) blockUpdate(p pendingUpdate, msg string) {
 	a.emitReady(ReadyPayload{Message: msg, UpdateAvailable: true, UpdateVersion: p.saveVer, Blocked: true})
 }
 
+// failDownload는 드라이브에서 zip을 받지 못했을 때 대기 상태로 되돌린다. blockUpdate와 같지만
+// 사용자가 브라우저로 직접 받아 적용할 수 있게 그 zip의 드라이브 페이지 주소를 함께 보낸다.
+func (a *App) failDownload(p pendingUpdate, msg string) {
+	a.status("[중단] " + msg)
+	p.tempDir = ""
+	a.updateMu.Lock()
+	a.pending = &p
+	a.updateMu.Unlock()
+	a.emitReady(ReadyPayload{
+		Message:         msg,
+		Error:           true,
+		UpdateAvailable: true,
+		UpdateVersion:   p.saveVer,
+		Blocked:         true,
+		DownloadFailed:  true,
+		ManualURL:       "https://drive.google.com/file/d/" + p.target.id + "/view",
+	})
+}
+
+// ApplyLocalZip은 "받은 zip으로 업데이트" 버튼에서 호출된다. 드라이브 다운로드가 막혔을 때
+// 사용자가 브라우저로 받은 zip을 골라 대기 중인 업데이트에 그대로 쓴다 — 받아 둔 zip을 다시
+// 쓰는 경로(pendingUpdate.tempDir)를 그대로 타므로, 이후 TTD 실행 중 확인·백업·적용은 평소와 같다.
+// 시작했으면 true, 사용자가 취소했으면 false, 쓸 수 없는 파일이면 그 이유를 오류로 돌려준다.
+func (a *App) ApplyLocalZip() (bool, error) {
+	a.updateMu.Lock()
+	pending := a.pending
+	a.updateMu.Unlock()
+	if pending == nil {
+		return false, nil
+	}
+
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:   "받은 TTD 압축 파일 선택",
+		Filters: []runtime.FileFilter{{DisplayName: "TTD 압축 파일 (*.zip)", Pattern: "*.zip"}},
+	})
+	if err != nil || path == "" {
+		return false, nil
+	}
+	if err := checkTTDZip(path); err != nil {
+		return false, err
+	}
+
+	ver := versionFromName(filepath.Base(path))
+	if ver != pending.saveVer {
+		what := fmt.Sprintf("선택한 파일의 버전(v%s)", ver)
+		if ver == "0.0.0" {
+			what = "선택한 파일 이름에서 버전을 알 수 없어"
+		}
+		answer, _ := runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
+			Type:    runtime.QuestionDialog,
+			Title:   "버전 확인",
+			Message: fmt.Sprintf("%s 설치하려던 v%s와 다릅니다. 그래도 이 파일로 업데이트할까요?", what, pending.saveVer),
+		})
+		if answer != "Yes" {
+			return false, nil
+		}
+	}
+
+	a.updateMu.Lock()
+	p := a.pending
+	a.pending = nil
+	a.updateMu.Unlock()
+	if p == nil { // 그 사이 다른 경로로 업데이트가 시작됨
+		return false, nil
+	}
+	tempDir, err := os.MkdirTemp("", "gdrive_update_")
+	if err == nil {
+		err = copyFile(path, filepath.Join(tempDir, p.target.name))
+	}
+	if err != nil {
+		os.RemoveAll(tempDir)
+		a.updateMu.Lock()
+		a.pending = p
+		a.updateMu.Unlock()
+		return false, fmt.Errorf("선택한 파일을 복사하지 못했습니다: %w", err)
+	}
+	p.tempDir = tempDir
+	if ver != "0.0.0" {
+		p.saveVer = ver // 버전 기록은 실제로 적용하는 zip 기준
+	}
+	a.status(fmt.Sprintf("선택한 파일로 업데이트합니다. (%s)", path))
+	go a.applyUpdate(*p)
+	return true, nil
+}
+
 // pendingUpdate는 확인은 끝났지만 아직 사용자가 설치를 확정하지 않은 업데이트다.
 type pendingUpdate struct {
 	target  zipCandidate
@@ -426,15 +515,14 @@ func (a *App) applyUpdate(p pendingUpdate) {
 		a.status(fmt.Sprintf("파일 다운로드 중... (%s)", target.name))
 		if err := downloadDriveFile(target.id, zipPath, newHTTPClient(60*time.Second)); err != nil {
 			os.RemoveAll(tempDir)
+			const manualHint = "잠시 후 다시 \"업데이트\" 버튼을 누르거나, \"업데이트 수동으로 받기\"로 " +
+				"브라우저에서 받은 뒤 \"받은 zip으로 업데이트\"를 눌러 주세요."
 			if errors.Is(err, errDriveQuota) {
-				p.tempDir = ""
-				a.blockUpdate(p, "구글 드라이브의 다운로드 한도를 초과해 지금은 TTD를 받을 수 없습니다. "+
-					"새 버전이 나온 직후 사용자가 몰리면 생기며, 최대 24시간 걸릴 수 있습니다. "+
-					"잠시 후 다시 \"업데이트\" 버튼을 누르거나, \"TTD 다운로드\"에서 직접 받아 주세요.")
+				a.failDownload(p, "구글 드라이브의 다운로드 한도를 초과해 지금은 TTD를 받을 수 없습니다. "+
+					"새 버전이 나온 직후 사용자가 몰리면 생기며, 최대 24시간 걸릴 수 있습니다. "+manualHint)
 				return
 			}
-			a.status(fmt.Sprintf("[오류 발생] %v", err))
-			a.finish(fmt.Sprintf("업데이트 다운로드 실패: %v", err), false, true)
+			a.failDownload(p, fmt.Sprintf("업데이트 다운로드 실패: %v. %s", err, manualHint))
 			return
 		}
 	} else {

@@ -690,3 +690,11 @@ button.link-btn {
   flex: none;
   white-space: nowrap;
 }
+
+/* 드라이브 다운로드 실패 시: 브라우저로 직접 받기 / 받은 zip 고르기 */
+.fail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 4px;
+}

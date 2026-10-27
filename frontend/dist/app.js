@@ -152,6 +152,9 @@ let pendingUpdateVersion = "";
 const updateSection = document.getElementById("updateSection");
 const installUpdate = document.getElementById("installUpdate");
 const updateLabel = document.getElementById("updateLabel");
+const downloadFailActions = document.getElementById("downloadFailActions");
+const manualDownloadBtn = document.getElementById("manualDownloadBtn");
+const localZipBtn = document.getElementById("localZipBtn");
 
 function updateWillRun() {
   return pendingUpdateVersion !== "" && installUpdate.checked;
@@ -321,6 +324,8 @@ window.runtime.EventsOn("ready", (payload) => {
     installUpdate.checked = payload.skipUpdateVersion !== payload.updateVersion;
     updateLabel.textContent = `TTD v${payload.updateVersion} 업데이트 설치`;
   }
+  downloadFailActions.hidden = !payload.downloadFailed;
+  manualDownloadBtn.dataset.url = payload.manualUrl || "";
 
   applyPrefsPayload(payload);
   refreshLaunchLabel();
@@ -389,20 +394,38 @@ installUpdate.addEventListener("change", () => {
   }
 });
 
+// 업데이트가 시작되면(다운로드든, 받은 zip이든) 끝나고 백엔드가 "ready"를 다시 보낼 때까지
+// 업데이트 영역을 숨기고 버튼을 잠근다.
+function showUpdating(buttonText, header) {
+  pendingUpdateVersion = "";
+  updateSection.hidden = true;
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = buttonText;
+  statusDot.className = "dot";
+  progressBar.className = "progress-bar working";
+  headerText.textContent = header;
+}
+
+// 드라이브 다운로드가 막혔을 때: 고른 zip이 쓸 수 있는 파일이면 백엔드가 바로 적용을 시작한다.
+// 취소하면 false, 쓸 수 없는 파일이면 그 이유로 Promise가 거부된다.
+localZipBtn.addEventListener("click", async () => {
+  cancelAutoClose();
+  try {
+    if (await window.go.main.App.ApplyLocalZip()) {
+      showUpdating("받은 zip으로 업데이트 중...", "선택한 파일로 업데이트하는 중...");
+    }
+  } catch (err) {
+    alert(err);
+  }
+});
+
 confirmBtn.addEventListener("click", async () => {
   cancelAutoClose();
 
   // 업데이트 대기 중 + 설치 체크 → 창을 닫지 않고 지금 다운로드/적용을 시작한다. 끝나면 백엔드가
   // 다시 "ready"를 보내 이 버튼이 평소의 실행/닫기 버튼으로 돌아온다.
   if (updateWillRun()) {
-    const version = pendingUpdateVersion;
-    pendingUpdateVersion = "";
-    updateSection.hidden = true;
-    confirmBtn.disabled = true;
-    confirmBtn.textContent = `v${version} 업데이트 중...`;
-    statusDot.className = "dot";
-    progressBar.className = "progress-bar working";
-    headerText.textContent = "업데이트를 내려받는 중...";
+    showUpdating(`v${pendingUpdateVersion} 업데이트 중...`, "업데이트를 내려받는 중...");
     await window.go.main.App.StartUpdate();
     return;
   }
