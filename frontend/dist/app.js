@@ -471,7 +471,7 @@ themeButtons.forEach((b) =>
 );
 
 // 바로가기: WebView 안에서 페이지를 여는 대신 사용자의 기본 브라우저로 연다. data-url이 없는
-// "TTD 다운로드"는 업데이트 소스와 어긋나지 않도록 백엔드의 folderURL을 그대로 받아 쓴다.
+// "TTD 다운로드"는 업데이트 소스와 어긋나지 않도록 백엔드의 배포 페이지 주소(DownloadPageURL)를 그대로 받아 쓴다.
 document.querySelectorAll(".link-chip").forEach((b) =>
   b.addEventListener("click", async () => {
     const url = b.dataset.url || (await window.go.main.App.DownloadPageURL());

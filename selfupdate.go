@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -56,26 +55,9 @@ type selfUpdateInfo struct {
 // 초안(draft)·미리보기(prerelease)도 섞여 오므로 여기서 직접 걸러낸다. 설치 대상은
 // ttd_updater.exe가 첨부된 것 중 가장 높은 버전이다.
 func checkSelfUpdate() (selfUpdateInfo, bool) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(
-		"GET",
-		fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=30", updaterRepo),
-		nil,
-	)
-	if err != nil {
-		return selfUpdateInfo{}, false
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", browserUserAgent)
-
-	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != 200 {
-		return selfUpdateInfo{}, false
-	}
-	defer resp.Body.Close()
-
 	var rels []githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
+	client := &http.Client{Timeout: 10 * time.Second}
+	if err := githubAPIGet(client, "/repos/"+updaterRepo+"/releases?per_page=30", &rels); err != nil {
 		return selfUpdateInfo{}, false
 	}
 

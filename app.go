@@ -56,6 +56,7 @@ type App struct {
 	selfUpdateVersion     string
 	selfUpdateDownloadURL string
 	selfUpdateSize        int64
+	selfCheckDone         chan struct{} // run의 런처 자체 업데이트 확인이 끝나면 닫힌다
 }
 
 func NewApp() *App {
@@ -207,6 +208,9 @@ func (a *App) finishWithUpdate(version string) {
 }
 
 func (a *App) emitReady(p ReadyPayload) {
+	if a.selfCheckDone != nil {
+		<-a.selfCheckDone // 런처 자체 업데이트 확인 결과가 나온 뒤에 보낸다
+	}
 	p.SelfUpdateAvailable = a.selfUpdateDownloadURL != ""
 	p.SelfUpdateVersion = a.selfUpdateVersion
 	p.PrefsPayload = a.prefsPayload()
@@ -300,13 +304,19 @@ func (a *App) run() {
 
 	// ttd_updater 자신의 새 버전 확인은 TTD 본체 업데이트와 완전히 무관한 부가 기능이라,
 	// 실패해도(네트워크 문제, API 오류 등) 조용히 넘어가고 본 흐름을 막지 않는다.
-	if info, ok := checkSelfUpdate(); ok {
-		a.selfUpdateVersion = info.Version
-		a.selfUpdateDownloadURL = info.DownloadURL
-		a.selfUpdateSize = info.Size
-		a.status(fmt.Sprintf("ttd_updater 새 버전(v%s)이 있습니다.", info.Version))
-		runtime.EventsEmit(a.ctx, "selfNotes", info.Notes)
-	}
+	// TTD 확인과 동시에 돌려, GitHub가 느릴 때 두 확인의 대기 시간이 더해지지 않게 한다. 결과 필드는
+	// emitReady가 selfCheckDone을 기다린 뒤에만 읽는다.
+	a.selfCheckDone = make(chan struct{})
+	go func() {
+		defer close(a.selfCheckDone)
+		if info, ok := checkSelfUpdate(); ok {
+			a.selfUpdateVersion = info.Version
+			a.selfUpdateDownloadURL = info.DownloadURL
+			a.selfUpdateSize = info.Size
+			a.status(fmt.Sprintf("ttd_updater 새 버전(v%s)이 있습니다.", info.Version))
+			runtime.EventsEmit(a.ctx, "selfNotes", info.Notes)
+		}
+	}()
 
 	a.status("=== TTD 업데이트 확인 중 ===")
 	localVer := getLocalVersion()
@@ -530,9 +540,28 @@ func (a *App) applyUpdate(p pendingUpdate) {
 		zipPath = filepath.Join(tempDir, target.name)
 		a.status(fmt.Sprintf("파일 다운로드 중... (%s)", target.name))
 		progress := func(written, total int64) {
-			a.status(fmt.Sprintf("다운로드 중... %d%% (%s)", written*100/max(total, 1), formatBytes(written, total)))
+			if total > 0 {
+				a.status(fmt.Sprintf("다운로드 중... %d%% (%s)", written*100/total, formatBytes(written, total)))
+			} else {
+				a.status(fmt.Sprintf("다운로드 중... (%s)", formatBytes(written, total)))
+			}
 		}
-		if err := target.download(zipPath, progress); err != nil {
+		err = target.download(zipPath, progress)
+		if err != nil && target.id == "" {
+			// 확인은 GitHub에서 됐어도 첨부 파일 서버만 막힌 네트워크가 있다 — 같은 버전이 드라이브에도
+			// 있으면 그쪽으로 한 번 더 받아 본다.
+			a.status(fmt.Sprintf("[알림] GitHub에서 받지 못했습니다 — 구글 드라이브에서 다시 시도합니다. (%v)", err))
+			if dz, derr := latestDriveZip(newHTTPClient(20 * time.Second)); derr != nil {
+				err = fmt.Errorf("%w (드라이브 확인도 실패: %v)", err, derr)
+			} else if dz.ver != target.ver {
+				err = fmt.Errorf("%w (드라이브에는 v%s가 없어 다시 시도하지 못했습니다)", err, target.ver)
+			} else if derr = dz.download(zipPath, progress); derr != nil {
+				err = fmt.Errorf("GitHub: %v / 드라이브: %w", err, derr)
+			} else {
+				err = nil
+			}
+		}
+		if err != nil {
 			os.RemoveAll(tempDir)
 			const manualHint = "잠시 후 다시 \"업데이트\" 버튼을 누르거나, \"업데이트 수동으로 받기\"로 " +
 				"브라우저에서 받은 뒤 \"받은 zip으로 업데이트\"를 눌러 주세요."
