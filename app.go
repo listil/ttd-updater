@@ -149,6 +149,7 @@ type PrefsPayload struct {
 	GameClientExePath     string `json:"gameClientExePath"`
 	CreateDesktopShortcut bool   `json:"createDesktopShortcut"`
 	Theme                 string `json:"theme"`
+	SkipUpdateVersion     string `json:"skipUpdateVersion"`
 }
 
 func (a *App) prefsPayload() PrefsPayload {
@@ -163,6 +164,7 @@ func (a *App) prefsPayload() PrefsPayload {
 		GameClientExePath:     a.prefs.GameClientExePath,
 		CreateDesktopShortcut: a.prefs.CreateDesktopShortcut,
 		Theme:                 a.prefs.Theme,
+		SkipUpdateVersion:     a.prefs.SkipUpdateVersion,
 	}
 }
 
@@ -538,6 +540,18 @@ func (a *App) Confirm(launchOnClose, launchTTDNow, launchGameNow, createShortcut
 // "완료" 때 모아 저장하지 않는 건, 테마는 누르는 즉시 화면에 반영되는 설정이라서다.
 func (a *App) SetTheme(theme string) {
 	a.updatePrefs(func(p *Prefs) { p.Theme = theme })
+}
+
+// SetSkipUpdate는 "TTD vX 업데이트 설치" 체크를 바꿀 때마다 바로 저장한다 — 완료 버튼이 아니라
+// 창의 X로 닫아도 다음 실행에 해제 상태가 유지되게. 다시 체크하면 건너뛰기를 지운다.
+func (a *App) SetSkipUpdate(version string, skip bool) {
+	a.updatePrefs(func(p *Prefs) {
+		if skip {
+			p.SkipUpdateVersion = version
+		} else if p.SkipUpdateVersion == version {
+			p.SkipUpdateVersion = ""
+		}
+	})
 }
 
 // updatePrefs는 prefsMu를 잡은 채로 prefs를 고치고 저장한 뒤, 고친 결과의 사본을 돌려준다.

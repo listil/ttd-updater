@@ -22,6 +22,9 @@ type Prefs struct {
 	GameClientExePath     string `json:"game_client_exe_path"`
 	CreateDesktopShortcut bool   `json:"create_desktop_shortcut"`
 	Theme                 string `json:"theme"` // "light", "dark", 없으면 시스템 설정 따름
+	// SkipUpdateVersion은 사용자가 "TTD vX 업데이트 설치" 체크를 해제한 버전이다. 같은 버전이
+	// 다시 제안되면 체크 해제 상태로 보여주고, 더 새 버전이 나오면(값이 달라지면) 다시 체크된다.
+	SkipUpdateVersion string `json:"skip_update_version"`
 }
 
 // loadPrefs는 설정을 불러온다. 파일이 없으면(최초 실행) 체크박스가 모두 unchecked인

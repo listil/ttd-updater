@@ -11,6 +11,8 @@ export function FolderURL():Promise<string>;
 
 export function SaveGameSetup(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function SetSkipUpdate(arg1:string,arg2:boolean):Promise<void>;
+
 export function SetTheme(arg1:string):Promise<void>;
 
 export function StartUpdate():Promise<void>;

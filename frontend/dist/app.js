@@ -269,7 +269,8 @@ window.runtime.EventsOn("ready", (payload) => {
   pendingUpdateVersion = payload.updateAvailable ? payload.updateVersion : "";
   updateSection.hidden = !payload.updateAvailable;
   if (payload.updateAvailable) {
-    installUpdate.checked = true;
+    // 지난번에 이 버전의 설치 체크를 해제했다면 그대로 해제 상태로 보여준다(새 버전이면 다시 체크).
+    installUpdate.checked = payload.skipUpdateVersion !== payload.updateVersion;
     updateLabel.textContent = `TTD v${payload.updateVersion} 업데이트 설치`;
   }
 
@@ -333,7 +334,12 @@ gameSetupSave.addEventListener("click", async () => {
   gameSetupPanel.hidden = true;
 });
 
-installUpdate.addEventListener("change", refreshLaunchLabel);
+installUpdate.addEventListener("change", () => {
+  refreshLaunchLabel();
+  if (pendingUpdateVersion) {
+    window.go.main.App.SetSkipUpdate(pendingUpdateVersion, !installUpdate.checked);
+  }
+});
 
 confirmBtn.addEventListener("click", async () => {
   cancelAutoClose();
