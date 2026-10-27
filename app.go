@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+// folderURL은 예전 배포처인 구글 드라이브 폴더다. 지금은 GitHub(ttdRepo)에 접속할 수 없을 때만 쓴다.
 const folderURL = "https://drive.google.com/drive/folders/1vqdXS4oNRkVy1r8-1DkWVC5mvvsUhreF"
 
 var (
@@ -222,8 +224,49 @@ func (a *App) emitVersions(local, remote string) {
 	runtime.EventsEmit(a.ctx, "versions", map[string]string{"local": local, "remote": remote})
 }
 
+// zipCandidate는 받을 TTD zip 하나다. GitHub 릴리즈에서 찾았으면 url/size/page가, 구글 드라이브
+// (대비용)에서 찾았으면 id가 채워진다.
 type zipCandidate struct {
 	id, name, ver string
+	url, page     string
+	size          int64
+}
+
+// manualURL은 사용자가 브라우저로 직접 받을 페이지다("업데이트 수동으로 받기").
+func (z zipCandidate) manualURL() string {
+	if z.id != "" {
+		return "https://drive.google.com/file/d/" + z.id + "/view"
+	}
+	if z.page != "" {
+		return z.page
+	}
+	return ttdReleasesPage
+}
+
+// download는 zip을 destPath로 받는다 — GitHub 첨부 파일이면 바로, 드라이브면 확인 페이지 처리까지.
+func (z zipCandidate) download(destPath string, progress func(written, total int64)) error {
+	if z.id != "" {
+		return downloadDriveFile(z.id, destPath, newDownloadClient(), progress)
+	}
+	return downloadURLFile(z.url, destPath, z.size, newDownloadClient(), progress)
+}
+
+// latestDriveZip은 대비용 배포처인 구글 드라이브 폴더에서 버전이 가장 높은 zip을 찾는다.
+func latestDriveZip(client *http.Client) (zipCandidate, error) {
+	entries, err := listDriveFolder(extractFolderID(folderURL), client)
+	if err != nil {
+		return zipCandidate{}, err
+	}
+	var zips []zipCandidate
+	for _, e := range entries {
+		if strings.HasSuffix(strings.ToLower(e.name), ".zip") {
+			zips = append(zips, zipCandidate{id: e.id, name: e.name, ver: versionFromName(e.name)})
+		}
+	}
+	if len(zips) == 0 {
+		return zipCandidate{}, fmt.Errorf("드라이브 폴더에서 ZIP 파일을 찾지 못했습니다")
+	}
+	return pickHighestVersion(zips), nil
 }
 
 func pickHighestVersion(cands []zipCandidate) zipCandidate {
@@ -265,15 +308,15 @@ func (a *App) run() {
 		runtime.EventsEmit(a.ctx, "selfNotes", info.Notes)
 	}
 
-	a.status("=== 구글 드라이브 업데이트 확인 중 ===")
+	a.status("=== TTD 업데이트 확인 중 ===")
 	localVer := getLocalVersion()
 	a.status(fmt.Sprintf("현재 로컬 버전: %s", localVer))
 	a.emitVersions(localVer, "")
 
 	// 업데이트 내역 패널은 업데이트 확인/다운로드와 무관하게 병렬로 채운다 — 이미 최신이어도
 	// 최근 내역을 보여주고, 업데이트가 있으면 다운로드가 도는 동안 읽을 수 있게. 다만 NEW 표시는
-	// "드라이브에서 실제로 받을 수 있는 버전"까지만 붙여야 하므로(노트가 zip보다 먼저 갱신될 수
-	// 있음), 드라이브 최신 버전이 확인될 때까지(또는 run이 끝날 때까지) 기다렸다가 계산한다.
+	// "실제로 받을 수 있는 버전"까지만 붙여야 하므로(노트가 zip보다 먼저 갱신될 수 있음), 배포처의
+	// 최신 버전이 확인될 때까지(또는 run이 끝날 때까지) 기다렸다가 계산한다.
 	remoteKnown := make(chan string, 1)
 	var remoteOnce sync.Once
 	setRemote := func(v string) { remoteOnce.Do(func() { remoteKnown <- v }) }
@@ -284,55 +327,31 @@ func (a *App) run() {
 		runtime.EventsEmit(a.ctx, "notes", NotesPayload{Sections: sections})
 	}()
 
-	// 1. 파일 다운로드 없이 서버의 최신 버전 미리 검사
-	remoteZipName, remoteVer := getRemoteZipInfoWithoutDownload(folderURL)
-	if remoteVer != "" {
-		setRemote(remoteVer)
-		a.emitVersions(localVer, remoteVer)
-		a.status(fmt.Sprintf("드라이브 최신 파일 감지: %s (버전: %s)", remoteZipName, remoteVer))
-		if !isNewerVersion(remoteVer, localVer) {
-			a.status(">> 이미 최신 버전을 사용 중입니다.")
-			a.finish("이미 최신 버전을 사용 중입니다.", true, false)
+	// 배포처는 GitHub Releases다. GitHub에 접속할 수 없을 때만(방화벽, API 제한 등) 예전 배포처인
+	// 구글 드라이브 폴더에서 찾는다.
+	client := newHTTPClient(20 * time.Second)
+	target, err := latestGitHubZip(client)
+	if err == nil {
+		a.status(fmt.Sprintf("GitHub 최신 릴리즈: %s (버전: %s)", target.name, target.ver))
+	} else {
+		a.status(fmt.Sprintf("[알림] GitHub 확인 실패 — 구글 드라이브에서 확인합니다. (%v)", err))
+		target, err = latestDriveZip(client)
+		if err != nil {
+			a.status(fmt.Sprintf("[오류 발생] %v", err))
+			a.finish("업데이트 확인 중 오류가 발생했습니다.", false, true)
 			return
 		}
-		a.status(fmt.Sprintf(">> 새 버전(%s)이 있습니다.", remoteVer))
+		a.status(fmt.Sprintf("드라이브 최신 파일: %s (버전: %s)", target.name, target.ver))
 	}
-
-	client := newHTTPClient(60 * time.Second)
-
-	// 2. 폴더 목록에서 최신 ZIP 하나만 찾아 그 파일만 받는다 (전체 폴더 다운로드 불필요)
-	folderID := extractFolderID(folderURL)
-	entries, err := listDriveFolder(folderID, client)
-	if err != nil {
-		a.status(fmt.Sprintf("[오류 발생] %v", err))
-		a.finish("업데이트 확인 중 오류가 발생했습니다.", false, true)
-		return
-	}
-
-	var zipEntries []zipCandidate
-	for _, e := range entries {
-		if !strings.HasSuffix(strings.ToLower(e.name), ".zip") {
-			continue
-		}
-		zipEntries = append(zipEntries, zipCandidate{id: e.id, name: e.name, ver: versionFromName(e.name)})
-	}
-	if len(zipEntries) == 0 {
-		a.status("드라이브 폴더 내에 ZIP 파일이 없습니다.")
-		a.finish("드라이브 폴더 내에 ZIP 파일을 찾지 못했습니다.", false, true)
-		return
-	}
-	target := pickHighestVersion(zipEntries)
 	setRemote(target.ver)
-	if remoteVer == "" {
-		a.emitVersions(localVer, target.ver)
-	}
+	a.emitVersions(localVer, target.ver)
 
-	// 사전 검사를 안 거쳤던 경우 여기서 최종 체크
-	if remoteVer == "" && !isNewerVersion(target.ver, localVer) {
+	if !isNewerVersion(target.ver, localVer) {
 		a.status(">> 이미 최신 버전을 사용 중입니다.")
 		a.finish("이미 최신 버전을 사용 중입니다.", true, false)
 		return
 	}
+	a.status(fmt.Sprintf(">> 새 버전(%s)이 있습니다.", target.ver))
 
 	// 업데이트를 제안하기 전에 targetDir가 TTD 설치 폴더가 맞는지(또는 비어 있는지) 확인한다 —
 	// 엉뚱한 폴더(소스 폴더, 다운로드 폴더 등)에서 실행됐다면 업데이트 버튼 자체를 내놓지 않는다.
@@ -344,10 +363,7 @@ func (a *App) run() {
 
 	// 자동으로 받지 않는다 — 여기서 멈추고 사용자가 "업데이트"를 눌러(StartUpdate) 확정할 때까지
 	// 기다린다. 체크를 풀고 닫으면 이번엔 업데이트 없이 그대로 실행/종료한다.
-	saveVer := remoteVer
-	if saveVer == "" {
-		saveVer = target.ver
-	}
+	saveVer := target.ver
 	a.updateMu.Lock()
 	a.pending = &pendingUpdate{target: target, saveVer: saveVer}
 	a.updateMu.Unlock()
@@ -402,7 +418,7 @@ func (a *App) failDownload(p pendingUpdate, msg string) {
 		UpdateVersion:   p.saveVer,
 		Blocked:         true,
 		DownloadFailed:  true,
-		ManualURL:       "https://drive.google.com/file/d/" + p.target.id + "/view",
+		ManualURL:       p.target.manualURL(),
 	})
 }
 
@@ -513,7 +529,10 @@ func (a *App) applyUpdate(p pendingUpdate) {
 		}
 		zipPath = filepath.Join(tempDir, target.name)
 		a.status(fmt.Sprintf("파일 다운로드 중... (%s)", target.name))
-		if err := downloadDriveFile(target.id, zipPath, newHTTPClient(60*time.Second)); err != nil {
+		progress := func(written, total int64) {
+			a.status(fmt.Sprintf("다운로드 중... %d%% (%s)", written*100/max(total, 1), formatBytes(written, total)))
+		}
+		if err := target.download(zipPath, progress); err != nil {
 			os.RemoveAll(tempDir)
 			const manualHint = "잠시 후 다시 \"업데이트\" 버튼을 누르거나, \"업데이트 수동으로 받기\"로 " +
 				"브라우저에서 받은 뒤 \"받은 zip으로 업데이트\"를 눌러 주세요."
@@ -689,10 +708,10 @@ func (a *App) updatePrefs(change func(*Prefs)) Prefs {
 	return a.prefs
 }
 
-// FolderURL은 TTD 배포 구글 드라이브 폴더 주소다 — 프론트엔드의 "TTD 다운로드" 바로가기가
+// DownloadPageURL은 TTD 배포 페이지(GitHub Releases) 주소다 — 프론트엔드의 "TTD 다운로드" 바로가기가
 // 업데이트 소스와 어긋나지 않게 같은 상수를 그대로 쓴다.
-func (a *App) FolderURL() string {
-	return folderURL
+func (a *App) DownloadPageURL() string {
+	return ttdReleasesPage
 }
 
 // UpdaterVersion은 이 런처(ttd_updater) 빌드 자신의 버전이다 — 헤더 "업데이트 · 런처 vX" 표시용.

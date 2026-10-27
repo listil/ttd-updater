@@ -18,8 +18,8 @@ export function DefaultClientExePath() {
   return window['go']['main']['App']['DefaultClientExePath']();
 }
 
-export function FolderURL() {
-  return window['go']['main']['App']['FolderURL']();
+export function DownloadPageURL() {
+  return window['go']['main']['App']['DownloadPageURL']();
 }
 
 export function SaveGameSetup(arg1, arg2, arg3) {

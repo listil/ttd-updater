@@ -7,9 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -28,59 +26,6 @@ func doGet(client *http.Client, rawURL string) (*http.Response, error) {
 	}
 	req.Header.Set("User-Agent", browserUserAgent)
 	return client.Do(req)
-}
-
-// getRemoteZipInfoWithoutDownload는 다운로드 없이 구글 드라이브 폴더 HTML만 스캔하여
-// ZIP 파일명과 추출된 버전을 반환한다. 실패 시 ("", "")를 반환한다.
-func getRemoteZipInfoWithoutDownload(folderURL string) (string, string) {
-	client := newHTTPClient(10 * time.Second)
-	resp, err := doGet(client, folderURL)
-	if err != nil {
-		fmt.Printf("[알림] 온라인 버전 사전 확인 실패 (일반 방식으로 전환): %v\n", err)
-		return "", ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return "", ""
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", ""
-	}
-	text := string(body)
-
-	zipNameRe := regexp.MustCompile(`[a-zA-Z0-9_\-.]+\.zip`)
-	verRe := regexp.MustCompile(`(?i)TTD[_-]?v?(\d+\.\d+\.\d+)`)
-	genRe := regexp.MustCompile(`(\d+\.\d+\.\d+)`)
-
-	type foundEntry struct{ name, ver string }
-	seen := map[string]bool{}
-	var found []foundEntry
-	for _, name := range zipNameRe.FindAllString(text, -1) {
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		if m := verRe.FindStringSubmatch(name); m != nil {
-			found = append(found, foundEntry{name, m[1]})
-		} else if m := genRe.FindStringSubmatch(name); m != nil {
-			found = append(found, foundEntry{name, m[1]})
-		}
-	}
-	if len(found) == 0 {
-		return "", ""
-	}
-	sort.Slice(found, func(i, j int) bool {
-		pi, _ := parseVersion(found[i].ver)
-		pj, _ := parseVersion(found[j].ver)
-		for k := 0; k < 3; k++ {
-			if pi[k] != pj[k] {
-				return pi[k] > pj[k]
-			}
-		}
-		return false
-	})
-	return found[0].name, found[0].ver
 }
 
 func extractFolderID(folderURL string) string {
@@ -208,7 +153,7 @@ func isDriveQuotaPage(body string) bool {
 // destPath로 내려받는다. 실패하면 "어느 단계에서 왜" 실패했는지(드라이브가 보낸 페이지 내용,
 // HTTP 상태, 받다가 끊긴 바이트 수)를 오류 문구에 그대로 담는다 — 사용자 화면의 진행 로그만
 // 보고도 원인(주소를 못 찾음 / 드라이브가 거부 / 받다가 끊김)을 구분할 수 있게.
-func downloadDriveFile(fileID, destPath string, client *http.Client) error {
+func downloadDriveFile(fileID, destPath string, client *http.Client, progress func(written, total int64)) error {
 	u := "https://drive.google.com/uc?id=" + fileID
 	var resp *http.Response
 
@@ -248,22 +193,7 @@ func downloadDriveFile(fileID, destPath string, client *http.Client) error {
 	}
 	defer resp.Body.Close()
 
-	out, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("임시 파일을 만들지 못했습니다: %w", err)
-	}
-	written, copyErr := io.Copy(out, resp.Body)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return fmt.Errorf("다운로드 중 연결이 끊겼습니다 (%s 받음): %w", formatBytes(written, resp.ContentLength), copyErr)
-	}
-	if resp.ContentLength > 0 && written != resp.ContentLength {
-		return fmt.Errorf("다운로드가 중간에 끊겼습니다 (%s 받음)", formatBytes(written, resp.ContentLength))
-	}
-	if closeErr != nil {
-		return fmt.Errorf("받은 파일을 저장하지 못했습니다: %w", closeErr)
-	}
-	return nil
+	return saveBody(resp.Body, destPath, resp.ContentLength, progress)
 }
 
 // formatBytes는 "12.3MB / 45.6MB" 형식으로 받은 양을 보여준다(전체 크기를 모르면 받은 양만).
